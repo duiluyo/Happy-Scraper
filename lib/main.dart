@@ -15,11 +15,132 @@ import 'package:image/image.dart' as img;
 import 'package:path/path.dart' as p;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:smb_connect/smb_connect.dart' as smb;
+import 'package:window_manager/legacy.dart';
 
 /// 每次修改代码都要同步修改这里和 pubspec.yaml 里的 version
 const appVersion = '1.7.1';
 
-void main() => runApp(const ScraperApp());
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  if (Platform.isWindows) {
+    await _initWindowMemory();
+  }
+
+  runApp(const ScraperApp());
+}
+
+final String _windowStatePath = p.join(_dataDir, 'window_state.json');
+
+Future<Map<String, dynamic>?> _readWindowState() async {
+  try {
+    final file = File(_windowStatePath);
+    if (!await file.exists()) return null;
+    return jsonDecode(await file.readAsString())
+        as Map<String, dynamic>;
+  } catch (_) {
+    return null;
+  }
+}
+
+Future<void> _initWindowMemory() async {
+  await windowManager.ensureInitialized();
+
+  final saved = await _readWindowState();
+
+  await windowManager.setMinimumSize(const Size(800, 600));
+
+  windowManager.addListener(_WindowMemory());
+  await windowManager.setPreventClose(true);
+
+  final options = WindowOptions(
+    size: saved == null
+        ? const Size(1100, 760)
+        : Size(
+            (saved['width'] as num?)?.toDouble() ?? 1100,
+            (saved['height'] as num?)?.toDouble() ?? 760,
+          ),
+    center: saved == null,
+    title: '影片刮削器',
+  );
+
+  await windowManager.waitUntilReadyToShow(options, () async {
+    if (saved != null) {
+      await windowManager.setPosition(
+        Offset(
+          (saved['x'] as num?)?.toDouble() ?? 100,
+          (saved['y'] as num?)?.toDouble() ?? 100,
+        ),
+      );
+
+      if (saved['maximized'] == true) {
+        await windowManager.maximize();
+      }
+    }
+
+    await windowManager.show();
+    await windowManager.focus();
+  });
+}
+
+class _WindowMemory extends WindowListener {
+  Timer? _timer;
+
+  void _scheduleSave() {
+    _timer?.cancel();
+    _timer = Timer(
+      const Duration(milliseconds: 500),
+      _save,
+    );
+  }
+
+  Future<void> _save() async {
+    try {
+      final file = File(_windowStatePath);
+      await file.parent.create(recursive: true);
+
+      Map<String, dynamic> data =
+          await _readWindowState() ?? {};
+
+      final maximized = await windowManager.isMaximized();
+
+      data['maximized'] = maximized;
+
+      // 最大化时保留上次正常窗口的尺寸和位置
+      if (!maximized) {
+        final bounds = await windowManager.getBounds();
+        data['x'] = bounds.left;
+        data['y'] = bounds.top;
+        data['width'] = bounds.width;
+        data['height'] = bounds.height;
+      }
+
+      await file.writeAsString(jsonEncode(data));
+    } catch (_) {}
+  }
+
+  @override
+  void onWindowResize() => _scheduleSave();
+
+  @override
+  void onWindowMove() => _scheduleSave();
+
+  @override
+  void onWindowMaximize() => _scheduleSave();
+
+  @override
+  void onWindowUnmaximize() => _scheduleSave();
+
+  @override
+  void onWindowClose() async {
+    _timer?.cancel();
+    await _save();
+    await windowManager.setPreventClose(false);
+    await windowManager.destroy();
+  }
+}
+
 
 final themeNotifier = ValueNotifier<ThemeMode>(ThemeMode.system);
 
