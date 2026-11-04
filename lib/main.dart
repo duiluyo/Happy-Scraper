@@ -17,7 +17,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:smb_connect/smb_connect.dart' as smb;
 
 /// 每次修改代码都要同步修改这里和 pubspec.yaml 里的 version
-const appVersion = '1.7.0';
+const appVersion = '1.7.1';
 
 void main() => runApp(const ScraperApp());
 
@@ -861,6 +861,7 @@ abstract class Fs {
   Future<bool> exists(String path);
   Future<void> mkdirs(String dir);
   Future<void> writeBytes(String path, List<int> data);
+  Future<Uint8List> readBytes(String path);
   Future<void> move(String from, String to);
   Future<void> delete(String path);
   Future<void> close();
@@ -889,6 +890,9 @@ class LocalFs implements Fs {
   Future<void> writeBytes(String path, List<int> data) async {
     await File(path).writeAsBytes(data);
   }
+
+  @override
+  Future<Uint8List> readBytes(String path) => File(path).readAsBytes();
 
   @override
   Future<void> move(String from, String to) async {
@@ -982,6 +986,11 @@ class SmbFs implements Fs {
     w.add(data);
     await w.flush();
     await w.close();
+  }
+
+  @override
+  Future<Uint8List> readBytes(String path) async {
+    throw UnsupportedError('网络共享暂不支持修复图片');
   }
 
   @override
@@ -1376,6 +1385,156 @@ class _DiagDialogState extends State<DiagDialog> {
   }
 }
 
+// ═══════════════════════ 修复图片（旧版本留下的横版图）═══════════════════════
+
+/// 分析一张封面图：返回 [海报图片字节或 null, 是否横版（true/false，null 表示无法解码）]
+List<Object?> analyzePoster(Uint8List bytes) {
+  final im = img.decodeImage(bytes);
+  if (im == null) return [null, null];
+  if (im.width > im.height * 1.2) {
+    final x = (im.width * 0.4733).round();
+    final c = img.copyCrop(im,
+        x: x, y: 0, width: im.width - x, height: im.height);
+    return [Uint8List.fromList(img.encodeJpg(c, quality: 92)), true];
+  }
+  return [null, false];
+}
+
+/// 修复一部影片的图片：把横版图（如 SSIS-123.jpg）改名为 SSIS-123-fanart.jpg，
+/// 并裁出竖版海报 SSIS-123-poster.jpg。不需要联网。
+/// 返回 0=已修复  1=不需要处理  2=没有可用的图片或无法读取
+/// moves / created 用来记录操作，供「撤销」使用
+Future<int> fixImages(Fs fs, String videoPath,
+    {List? moves, List? created}) async {
+  final dir = p.dirname(videoPath);
+  final stem = p.basenameWithoutExtension(videoPath);
+  final all = await fs.list(dir);
+  final byLower = <String, String>{
+    for (final e in all)
+      if (!e.isDir) e.name.toLowerCase(): e.path,
+  };
+  String? find(List<String> names) {
+    for (final n in names) {
+      final v = byLower[n.toLowerCase()];
+      if (v != null) return v;
+    }
+    return null;
+  }
+
+  const exts = ['.jpg', '.jpeg', '.png', '.webp'];
+  // 已经有海报了
+  if (find([
+        for (final x in exts) '$stem-poster$x',
+        'poster.jpg',
+        'poster.png',
+        'folder.jpg',
+      ]) !=
+      null) {
+    return 1;
+  }
+  final fanart = find([for (final x in exts) '$stem-fanart$x']);
+  final legacy = find([
+    for (final x in exts) '$stem$x',
+    '$stem-thumb.jpg',
+    '$stem-cover.jpg',
+  ]);
+  final src = fanart ?? legacy;
+  if (src == null) return 2;
+
+  final bytes = await fs.readBytes(src);
+  final r = await compute(analyzePoster, bytes);
+  final cropped = r[0] as Uint8List?;
+  final landscape = r[1] as bool?;
+  if (landscape == null) return 2; // 图片损坏，读不出来
+
+  if (landscape) {
+    // 横版：旧版留下的同名图片改名为 -fanart，再裁出竖版海报
+    if (fanart == null) {
+      final target = p.join(dir, '$stem-fanart${p.extension(src)}');
+      if (!await fs.exists(target)) {
+        await fs.move(src, target);
+        moves?.add([src, target]);
+      }
+    }
+    final poster = p.join(dir, '$stem-poster.jpg');
+    await fs.writeBytes(poster, cropped!);
+    created?.add(poster);
+    return 0;
+  }
+
+  // 竖版：本身就是海报
+  final target = p.join(dir, '$stem-poster${p.extension(src)}');
+  if (fanart != null && src == fanart) {
+    await fs.writeBytes(target, bytes);
+    created?.add(target);
+  } else {
+    await fs.move(src, target);
+    moves?.add([src, target]);
+  }
+  return 0;
+}
+
+// ═══════════════════════ 影视库：扫描报告 ═══════════════════════
+
+class ScanReport {
+  final roots = <String>[];
+  int dirs = 0;
+  int videos = 0;
+  int links = 0;
+  int ms = 0;
+  String error = '';
+  final dirsByDepth = <int, int>{};
+  final videosByDepth = <int, int>{};
+  final skippedDirs = <String>[];
+  final failedDirs = <String>[];
+  final failedItems = <String>[];
+  final linkSamples = <String>[];
+  final otherExts = <String, int>{};
+
+  String toText() {
+    final b = StringBuffer();
+    b.writeln('扫描报告（影片刮削器 v$appVersion）');
+    b.writeln('影片文件夹：');
+    for (final r in roots) {
+      b.writeln('  $r');
+    }
+    b.writeln('共扫描 $dirs 个文件夹，找到 $videos 部影片，用时 ${(ms / 1000).toStringAsFixed(1)} 秒');
+    if (error.isNotEmpty) b.writeln('⚠️ 扫描中途出错：$error');
+    b.writeln('');
+    b.writeln('按层级统计（第 0 层 = 添加的文件夹本身）：');
+    final depths = {...dirsByDepth.keys, ...videosByDepth.keys}.toList()
+      ..sort();
+    for (final d in depths) {
+      b.writeln(
+          '  第 $d 层：文件夹 ${dirsByDepth[d] ?? 0} 个，影片 ${videosByDepth[d] ?? 0} 部');
+    }
+    void section(String title, List<String> list, {int max = 30}) {
+      if (list.isEmpty) return;
+      b.writeln('');
+      b.writeln('$title（${list.length}）：');
+      for (final x in list.take(max)) {
+        b.writeln('  $x');
+      }
+      if (list.length > max) b.writeln('  …还有 ${list.length - max} 项');
+    }
+
+    section('被跳过的文件夹', skippedDirs);
+    section('读取失败的文件夹', failedDirs);
+    section('读取失败的影片', failedItems);
+    if (links > 0) {
+      section('链接 / 联接（不会进入）共 $links 个，示例', linkSamples, max: 10);
+    }
+    if (otherExts.isNotEmpty) {
+      final e = otherExts.entries.toList()
+        ..sort((a, b) => b.value.compareTo(a.value));
+      b.writeln('');
+      b.writeln('被忽略的文件类型（不是视频）：');
+      b.writeln('  ${e.take(15).map((x) => '${x.key} ×${x.value}').join('   ')}');
+    }
+    return b.toString();
+  }
+}
+
 // ═══════════════════════ 影视库（电脑版）═══════════════════════
 
 const _imgExts = {'.jpg', '.jpeg', '.png', '.webp'};
@@ -1401,6 +1560,7 @@ class LibItem {
   String poster = '';
   String fanart = '';
   bool hasStills = false;
+  String legacy = ''; // 旧版本留下的同名图片（如 SSIS-123.jpg）
 
   LibItem(this.path);
 
@@ -1411,8 +1571,13 @@ class LibItem {
   /// 收藏、已看的记录用番号做键，整理移动文件后也不会丢；没有番号就用路径
   String get key => num.isNotEmpty ? num : path;
 
-  /// 有 NFO 但找不到封面
-  bool get incomplete => hasNfo && poster.isEmpty && fanart.isEmpty;
+  /// 有 NFO 但找不到任何封面图
+  bool get incomplete =>
+      hasNfo && poster.isEmpty && fanart.isEmpty && legacy.isEmpty;
+
+  /// 有横版图但没有竖版海报（可以用「修复图片」处理）
+  bool get needsImageFix =>
+      poster.isEmpty && (legacy.isNotEmpty || fanart.isNotEmpty);
 
   void copyMetaFrom(LibItem o) {
     num = o.num;
@@ -1448,6 +1613,7 @@ class LibItem {
         'poster': poster,
         'fanart': fanart,
         'hasStills': hasStills,
+        'legacy': legacy,
       };
 
   factory LibItem.fromJson(Map<String, dynamic> j) {
@@ -1470,6 +1636,7 @@ class LibItem {
     it.poster = (j['poster'] ?? '') as String;
     it.fanart = (j['fanart'] ?? '') as String;
     it.hasStills = (j['hasStills'] ?? false) as bool;
+    it.legacy = (j['legacy'] ?? '') as String;
     return it;
   }
 }
@@ -1654,63 +1821,105 @@ class LibraryStore extends ChangeNotifier {
     notifyListeners();
   }
 
+  ScanReport? report;
+
   /// 重新扫描所有影片文件夹。NFO 没有变化的影片直接沿用上次的结果，所以很快
   Future<void> rescan() async {
     if (scanning) return;
     scanning = true;
     scanMsg = '正在扫描…';
     notifyListeners();
+    final rep = ScanReport()..roots.addAll(folders);
+    final sw = Stopwatch()..start();
     try {
       final old = {for (final it in items) it.path: it};
       final out = <LibItem>[];
       for (final root in List<String>.of(folders)) {
-        await _scanRoot(root, old, out);
+        await _scanRoot(root, old, out, rep);
       }
       items = out;
+      rep.videos = out.length;
       await _saveIndex();
-    } catch (_) {
+    } catch (e) {
+      rep.error = errText(e);
     } finally {
+      sw.stop();
+      rep.ms = sw.elapsedMilliseconds;
+      report = rep;
       scanning = false;
       scanMsg = '';
       notifyListeners();
     }
   }
 
-  Future<void> _scanRoot(
-      String root, Map<String, LibItem> old, List<LibItem> out) async {
-    final stack = <String>[root];
+  Future<void> _scanRoot(String root, Map<String, LibItem> old,
+      List<LibItem> out, ScanReport rep) async {
+    final stack = <(String, int)>[(root, 0)];
     var n = 0;
     while (stack.isNotEmpty) {
-      final dir = stack.removeLast();
-      List<FileSystemEntity> entries;
+      final cur = stack.removeLast();
+      final dir = cur.$1;
+      final depth = cur.$2;
+      final entries = <FileSystemEntity>[];
       try {
-        entries = await Directory(dir).list(followLinks: false).toList();
-      } catch (_) {
+        await for (final e in Directory(dir)
+            .list(followLinks: false)
+            .handleError((Object err) {
+          rep.failedDirs.add('$dir：${errText(err)}');
+        })) {
+          entries.add(e);
+        }
+      } catch (e) {
+        rep.failedDirs.add('$dir：${errText(e)}');
         continue;
       }
+      rep.dirs++;
+      rep.dirsByDepth[depth] = (rep.dirsByDepth[depth] ?? 0) + 1;
+
       final names = <String, String>{}; // 小写文件名 → 实际文件名
       final files = <File>[];
       for (final e in entries) {
         final name = p.basename(e.path);
         names[name.toLowerCase()] = name;
         if (e is Directory) {
+          String? why;
           if (name.startsWith('@') ||
               name.startsWith('#') ||
               name.startsWith('.') ||
-              name.startsWith('\$') ||
-              name == 'System Volume Information' ||
-              name == 'extrafanart' ||
-              name.endsWith('-extrafanart')) {
+              name.startsWith('\$')) {
+            why = '名字以 ${name[0]} 开头';
+          } else if (name == 'System Volume Information') {
+            why = '系统文件夹';
+          }
+          if (why != null) {
+            rep.skippedDirs.add('${e.path}（$why）');
             continue;
           }
-          stack.add(e.path);
-        } else if (e is File &&
-            _videoExts.contains(p.extension(name).toLowerCase())) {
-          files.add(e);
+          if (name == 'extrafanart' || name.endsWith('-extrafanart')) {
+            continue; // 剧照文件夹，里面没有影片
+          }
+          stack.add((e.path, depth + 1));
+        } else if (e is Link) {
+          rep.links++;
+          if (rep.linkSamples.length < 10) rep.linkSamples.add(e.path);
+        } else if (e is File) {
+          final ext = p.extension(name).toLowerCase();
+          if (_videoExts.contains(ext)) {
+            files.add(e);
+          } else {
+            final k = ext.isEmpty ? '（无后缀）' : ext;
+            rep.otherExts[k] = (rep.otherExts[k] ?? 0) + 1;
+          }
         }
       }
+      rep.videosByDepth[depth] = (rep.videosByDepth[depth] ?? 0) + files.length;
+
       for (final f in files) {
-        out.add(await _buildItem(f, names, old[f.path]));
+        try {
+          out.add(await _buildItem(f, names, old[f.path]));
+        } catch (e) {
+          rep.failedItems.add('${f.path}：${errText(e)}');
+        }
         n++;
         if (n % 20 == 0) {
           scanMsg = '已扫描 $n 部…';
@@ -1766,21 +1975,24 @@ class LibraryStore extends ChangeNotifier {
       return '';
     }
 
+    const imgExts = ['.jpg', '.jpeg', '.png', '.webp'];
     it.poster = pick([
-      '$stem-poster.jpg',
-      '$stem-poster.png',
-      '$stem-poster.jpeg',
+      for (final x in imgExts) '$stem-poster$x',
       'poster.jpg',
       'poster.png',
       'folder.jpg',
       'cover.jpg',
     ]);
     it.fanart = pick([
-      '$stem-fanart.jpg',
-      '$stem-fanart.png',
+      for (final x in imgExts) '$stem-fanart$x',
       'fanart.jpg',
       'backdrop.jpg',
+    ]);
+    // 旧版本留下的同名图片，没有 -fanart / -poster 后缀
+    it.legacy = pick([
+      for (final x in imgExts) '$stem$x',
       '$stem-thumb.jpg',
+      '$stem-cover.jpg',
     ]);
     it.hasStills = names.containsKey('extrafanart') ||
         names.containsKey('$stem-extrafanart'.toLowerCase());
@@ -1979,7 +2191,13 @@ Widget _posterImage(String path, {BoxFit fit = BoxFit.cover, int? cacheWidth}) {
 class LibraryPage extends StatefulWidget {
   /// 对一批影片重新刮削（由刮削页面执行）
   final Future<void> Function(List<LibItem> items) onRescrape;
-  const LibraryPage({super.key, required this.onRescrape});
+  /// 修复图片后，通知主界面刷新「撤销」按钮
+  final VoidCallback onJournalChanged;
+  const LibraryPage({
+    super.key,
+    required this.onRescrape,
+    required this.onJournalChanged,
+  });
 
   @override
   State<LibraryPage> createState() => _LibraryPageState();
@@ -2069,6 +2287,9 @@ class _LibraryPageState extends State<LibraryPage> {
           break;
         case 'incomplete':
           if (!it.incomplete) return false;
+          break;
+        case 'imgfix':
+          if (!it.needsImageFix) return false;
           break;
         case 'dup':
           if (!dupKeys.contains(it.num)) return false;
@@ -2282,6 +2503,135 @@ class _LibraryPageState extends State<LibraryPage> {
     if (yes == true) await widget.onRescrape(list);
   }
 
+  Future<void> _showReport() async {
+    final r = libStore.report;
+    if (r == null) return;
+    final text = r.toText();
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('扫描报告'),
+        content: SizedBox(
+          width: 560,
+          height: 420,
+          child: SingleChildScrollView(
+            child: SelectableText(text, style: const TextStyle(fontSize: 13)),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: text));
+              ScaffoldMessenger.of(ctx).showSnackBar(
+                const SnackBar(content: Text('报告已复制')),
+              );
+            },
+            child: const Text('复制报告'),
+          ),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('关闭')),
+        ],
+      ),
+    );
+  }
+
+  /// 批量修复图片：横版图改名为 -fanart，并裁出竖版海报（不联网，可撤销）
+  Future<void> _fixImages(List<LibItem> list) async {
+    final yes = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('修复图片？'),
+        content: Text('将对 ${list.length} 部影片：\n'
+            '• 把横版图（如 番号.jpg）改名为 番号-fanart.jpg\n'
+            '• 从横版图裁出竖版海报 番号-poster.jpg\n\n'
+            '不需要联网，处理后可以在「刮削」页面右上角用 ↩ 撤销。'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('开始修复')),
+        ],
+      ),
+    );
+    if (yes != true || !mounted) return;
+
+    final progress = ValueNotifier<String>('准备中…');
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        title: const Text('正在修复图片'),
+        content: ValueListenableBuilder<String>(
+          valueListenable: progress,
+          builder: (_, v, __) => Text(v),
+        ),
+      ),
+    );
+
+    final fs = LocalFs();
+    final batch = <String, dynamic>{
+      'id': DateTime.now().toIso8601String(),
+      'label':
+          '修复图片 ${DateTime.now().toString().substring(0, 16)}（${list.length} 部）',
+      'fs': 'local',
+      'moves': [],
+      'created': [],
+      'dirs': [],
+    };
+    var ok = 0, skip = 0, fail = 0;
+    final errs = <String>[];
+    for (var i = 0; i < list.length; i++) {
+      final it = list[i];
+      progress.value =
+          '${i + 1} / ${list.length}\n${it.num.isEmpty ? it.stem : it.num}';
+      try {
+        final r = await fixImages(fs, it.path,
+            moves: batch['moves'] as List, created: batch['created'] as List);
+        if (r == 0) {
+          ok++;
+        } else if (r == 1) {
+          skip++;
+        } else {
+          fail++;
+          errs.add('${it.stem}：没有可用的图片或图片已损坏');
+        }
+      } catch (e) {
+        fail++;
+        errs.add('${it.stem}：${errText(e)}');
+      }
+      await Future<void>.delayed(Duration.zero);
+    }
+    if ((batch['moves'] as List).isNotEmpty ||
+        (batch['created'] as List).isNotEmpty) {
+      final all = await loadJournal();
+      all.add(batch);
+      await saveJournal(all);
+      widget.onJournalChanged();
+    }
+    if (mounted) Navigator.pop(context); // 关闭进度窗口
+    await libStore.rescan();
+    if (!mounted) return;
+    final detail = errs.isEmpty ? '' : '\n\n失败的：\n${errs.take(20).join('\n')}';
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('修复完成'),
+        content: SizedBox(
+          width: 420,
+          child: SingleChildScrollView(
+            child: Text('已修复 $ok 部，无需处理 $skip 部，失败 $fail 部$detail'),
+          ),
+        ),
+        actions: [
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('好')),
+        ],
+      ),
+    );
+  }
+
   Widget _badges(LibItem it) {
     return Row(
       mainAxisSize: MainAxisSize.min,
@@ -2295,7 +2645,9 @@ class _LibraryPageState extends State<LibraryPage> {
   }
 
   Widget _card(LibItem it) {
-    final img = it.poster.isNotEmpty ? it.poster : it.fanart;
+    final img = it.poster.isNotEmpty
+        ? it.poster
+        : (it.fanart.isNotEmpty ? it.fanart : it.legacy);
     return InkWell(
       onTap: () => _open(it),
       child: Card(
@@ -2354,7 +2706,9 @@ class _LibraryPageState extends State<LibraryPage> {
   }
 
   Widget _tile(LibItem it) {
-    final img = it.poster.isNotEmpty ? it.poster : it.fanart;
+    final img = it.poster.isNotEmpty
+        ? it.poster
+        : (it.fanart.isNotEmpty ? it.fanart : it.legacy);
     return ListTile(
       leading: SizedBox(
         width: 44,
@@ -2384,12 +2738,14 @@ class _LibraryPageState extends State<LibraryPage> {
   Widget build(BuildContext context) {
     final list = _filtered();
     final fixable = list.where((e) => !e.hasNfo || e.incomplete).toList();
+    final imgfix = list.where((e) => e.needsImageFix).toList();
     const quicks = [
       ['all', '全部'],
       ['fav', '收藏'],
       ['unseen', '未看'],
       ['unscraped', '未刮削'],
       ['incomplete', '缺封面'],
+      ['imgfix', '图片待修复'],
       ['dup', '重复番号'],
     ];
     return Scaffold(
@@ -2411,6 +2767,11 @@ class _LibraryPageState extends State<LibraryPage> {
             tooltip: '统计',
             icon: const Icon(Icons.bar_chart),
             onPressed: libStore.items.isEmpty ? null : _openStats,
+          ),
+          IconButton(
+            tooltip: '扫描报告',
+            icon: const Icon(Icons.assignment),
+            onPressed: libStore.report == null ? null : _showReport,
           ),
           IconButton(
             tooltip: '重新扫描',
@@ -2510,6 +2871,17 @@ class _LibraryPageState extends State<LibraryPage> {
                 ),
               ),
             ),
+          if (libStore.report != null && !libStore.scanning)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 2, 12, 0),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  '上次扫描：${libStore.report!.dirs} 个文件夹，找到 ${libStore.report!.videos} 部（点右上角 📄 查看扫描报告）',
+                  style: const TextStyle(fontSize: 12, color: Colors.grey),
+                ),
+              ),
+            ),
           if (libStore.scanning)
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 4, 12, 0),
@@ -2519,6 +2891,18 @@ class _LibraryPageState extends State<LibraryPage> {
                   const LinearProgressIndicator(),
                   Text(libStore.scanMsg, style: const TextStyle(fontSize: 12)),
                 ],
+              ),
+            ),
+          if (imgfix.isNotEmpty)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Padding(
+                padding: const EdgeInsets.only(left: 8),
+                child: TextButton.icon(
+                  onPressed: () => _fixImages(imgfix),
+                  icon: const Icon(Icons.crop_portrait),
+                  label: Text('修复图片 ${imgfix.length} 部（横版图改名并裁出竖版海报）'),
+                ),
               ),
             ),
           if (fixable.isNotEmpty)
@@ -2721,7 +3105,9 @@ class _LibraryDetailPageState extends State<LibraryDetailPage> {
   @override
   Widget build(BuildContext context) {
     final it = widget.item;
-    final big = it.fanart.isNotEmpty ? it.fanart : it.poster;
+    final big = it.fanart.isNotEmpty
+        ? it.fanart
+        : (it.legacy.isNotEmpty ? it.legacy : it.poster);
     return Scaffold(
       appBar: AppBar(
         title: Text(it.num.isEmpty ? it.title : it.num),
@@ -3186,6 +3572,76 @@ class _HomePageState extends State<HomePage> {
       context: context,
       builder: (_) => DiagDialog(checks: checks, proxy: s.proxy),
     );
+  }
+
+  /// 修复图片：把横版图改名为 -fanart，并裁出竖版海报（不联网，可撤销）
+  Future<void> _runFixImages() async {
+    final root = _selDir;
+    if (_running || _scanning || root == null) return;
+    _syncCfg();
+    final kind = _selKind;
+    setState(() {
+      _running = true;
+      _cancel = false;
+      _done = 0;
+      _total = 0;
+      _logs.clear();
+      _failed.clear();
+    });
+    _log('影片刮削器 v$appVersion');
+    _log('🖼 修复图片：$root');
+
+    final Fs fsys;
+    try {
+      if (kind == 'smb') _log('🔌 正在连接 ${s.smbHost} …');
+      fsys = await _openFs(kind);
+    } catch (e) {
+      _log('❌ 连接失败：${errText(e)}');
+      if (mounted) setState(() => _running = false);
+      return;
+    }
+    _failKind = kind;
+    final batch = _newBatch(
+        '修复图片 ${DateTime.now().toString().substring(0, 16)}  ${p.basename(root)}',
+        kind);
+    _batch = batch;
+
+    final files = List<String>.of(_files);
+    if (mounted) setState(() => _total = files.length);
+    _log('共 ${files.length} 个视频文件');
+
+    var ok = 0, skip = 0, fail = 0;
+    for (final path in files) {
+      if (_cancel) {
+        _log('⏹ 已停止');
+        break;
+      }
+      try {
+        final r = await fixImages(fsys, path,
+            moves: batch['moves'] as List, created: batch['created'] as List);
+        if (r == 0) {
+          ok++;
+          _log('✅ ${p.basename(path)}：已修复');
+        } else if (r == 1) {
+          skip++;
+        } else {
+          fail++;
+          _log('⚠️ ${p.basename(path)}：没有可用的图片或图片已损坏');
+        }
+      } catch (e) {
+        fail++;
+        _log('❌ ${p.basename(path)}：${errText(e)}');
+      }
+      if (mounted) setState(() => _done++);
+      await Future<void>.delayed(Duration.zero);
+    }
+    await _commitBatch();
+    _batch = null;
+    await fsys.close();
+    _log('🎉 完成：已修复 $ok，无需处理 $skip，失败/无图 $fail'
+        '${ok > 0 ? '（可点右上角 ↩ 撤销）' : ''}');
+    if (mounted) setState(() => _running = false);
+    if (!Platform.isAndroid) libStore.rescan();
   }
 
   /// 影视库里的「补刮 / 重新刮削」：对选中的影片重新刮削（覆盖已有 NFO 和封面）
@@ -4124,7 +4580,10 @@ class _HomePageState extends State<HomePage> {
               index: _tab,
               children: [
                 _buildScrape(context),
-                LibraryPage(onRescrape: _rescrapeLibrary),
+                LibraryPage(
+                  onRescrape: _rescrapeLibrary,
+                  onJournalChanged: _loadJournalInfo,
+                ),
               ],
             ),
           ),
@@ -4270,6 +4729,17 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ),
               ],
+            ),
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: SizedBox(
+                width: double.infinity,
+                child: FilledButton.tonalIcon(
+                  onPressed: canRun ? _runFixImages : null,
+                  icon: const Icon(Icons.crop_portrait),
+                  label: const Text('修复图片（横版图改名并裁出海报）'),
+                ),
+              ),
             ),
             if (_failed.isNotEmpty && !busy)
               Padding(
