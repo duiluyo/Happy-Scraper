@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:ui' show PointerDeviceKind;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
@@ -18,7 +19,7 @@ import 'package:smb_connect/smb_connect.dart' as smb;
 import 'package:window_manager/legacy.dart';
 
 /// 每次修改代码都要同步修改这里和 pubspec.yaml 里的 version
-const appVersion = '1.7.1';
+const appVersion = '1.7.2';
 
 
 Future<void> main() async {
@@ -3079,6 +3080,141 @@ class _LibraryPageState extends State<LibraryPage> {
   }
 }
 
+/// 把字节数显示成 B / KB / MB / GB
+String fmtSize(int bytes) {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  var v = bytes.toDouble();
+  var i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return i == 0 ? '$bytes B' : '${v.toStringAsFixed(2)} ${units[i]}';
+}
+
+/// 剧照大图浏览：上一张 / 下一张（也可以用键盘 ← →），滚轮缩放
+class _StillViewer extends StatefulWidget {
+  final List<String> paths;
+  final int initial;
+  const _StillViewer({required this.paths, required this.initial});
+
+  @override
+  State<_StillViewer> createState() => _StillViewerState();
+}
+
+class _StillViewerState extends State<_StillViewer> {
+  late int _i;
+
+  @override
+  void initState() {
+    super.initState();
+    _i = widget.initial;
+  }
+
+  void _go(int d) {
+    final n = widget.paths.length;
+    if (n == 0) return;
+    setState(() => _i = (_i + d + n) % n);
+  }
+
+  Widget _arrow(IconData icon, String tip, VoidCallback onTap) {
+    return Material(
+      color: Colors.black54,
+      shape: const CircleBorder(),
+      child: IconButton(
+        tooltip: tip,
+        iconSize: 32,
+        color: Colors.white,
+        icon: Icon(icon),
+        onPressed: onTap,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final size = MediaQuery.of(context).size;
+    final n = widget.paths.length;
+    return Focus(
+      autofocus: true,
+      onKeyEvent: (node, event) {
+        if (event is KeyDownEvent) {
+          if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+            _go(-1);
+            return KeyEventResult.handled;
+          }
+          if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
+            _go(1);
+            return KeyEventResult.handled;
+          }
+        }
+        return KeyEventResult.ignored;
+      },
+      child: Dialog(
+        insetPadding: const EdgeInsets.all(16),
+        backgroundColor: Colors.black,
+        child: SizedBox(
+          width: size.width * 0.88,
+          height: size.height * 0.86,
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: InteractiveViewer(
+                  key: ValueKey(_i),
+                  maxScale: 6,
+                  child: Center(
+                    child: _posterImage(widget.paths[_i], fit: BoxFit.contain),
+                  ),
+                ),
+              ),
+              if (n > 1)
+                Positioned(
+                  left: 8,
+                  top: 0,
+                  bottom: 0,
+                  child: Center(
+                    child: _arrow(Icons.chevron_left, '上一张（←）', () => _go(-1)),
+                  ),
+                ),
+              if (n > 1)
+                Positioned(
+                  right: 8,
+                  top: 0,
+                  bottom: 0,
+                  child: Center(
+                    child: _arrow(Icons.chevron_right, '下一张（→）', () => _go(1)),
+                  ),
+                ),
+              Positioned(
+                top: 8,
+                right: 8,
+                child: _arrow(Icons.close, '关闭', () => Navigator.pop(context)),
+              ),
+              Positioned(
+                bottom: 10,
+                left: 0,
+                right: 0,
+                child: Center(
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: Colors.black54,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text('${_i + 1} / $n',
+                        style: const TextStyle(color: Colors.white)),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class LibraryDetailPage extends StatefulWidget {
   final LibItem item;
   const LibraryDetailPage({super.key, required this.item});
@@ -3089,17 +3225,21 @@ class LibraryDetailPage extends StatefulWidget {
 
 class _LibraryDetailPageState extends State<LibraryDetailPage> {
   List<String> _stills = [];
+  int? _size; // 视频文件大小（字节）
+  final _stillCtl = ScrollController();
 
   @override
   void initState() {
     super.initState();
     libStore.addListener(_onStore);
     _loadStills();
+    _loadSize();
   }
 
   @override
   void dispose() {
     libStore.removeListener(_onStore);
+    _stillCtl.dispose();
     super.dispose();
   }
 
@@ -3128,6 +3268,20 @@ class _LibraryDetailPageState extends State<LibraryDetailPage> {
       } catch (_) {}
     }
     if (mounted) setState(() => _stills = out);
+  }
+
+  Future<void> _loadSize() async {
+    try {
+      final n = await File(widget.item.path).length();
+      if (mounted) setState(() => _size = n);
+    } catch (_) {}
+  }
+
+  void _openStill(int i) {
+    showDialog(
+      context: context,
+      builder: (_) => _StillViewer(paths: _stills, initial: i),
+    );
   }
 
   void _snack(String t) {
@@ -3304,6 +3458,7 @@ class _LibraryDetailPageState extends State<LibraryDetailPage> {
           _info('番号', it.num),
           _info('发行日期', it.date),
           _info('时长', it.runtime > 0 ? '${it.runtime} 分钟' : ''),
+          _info('文件大小', _size == null ? '' : fmtSize(_size!)),
           _info('导演', it.director),
           _chips('演员', it.actors, 'actor'),
           _chips('类别', it.genres, 'genre'),
@@ -3318,24 +3473,35 @@ class _LibraryDetailPageState extends State<LibraryDetailPage> {
                 style: const TextStyle(color: Colors.grey)),
             const SizedBox(height: 6),
             SizedBox(
-              height: 150,
-              child: ListView.builder(
-                scrollDirection: Axis.horizontal,
-                itemCount: _stills.length,
-                itemBuilder: (_, i) => Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: GestureDetector(
-                    onTap: () => showDialog(
-                      context: context,
-                      builder: (_) => Dialog(
-                        child: InteractiveViewer(
-                          child: _posterImage(_stills[i], fit: BoxFit.contain),
+              height: 168,
+              child: ScrollConfiguration(
+                behavior: ScrollConfiguration.of(context).copyWith(
+                  dragDevices: {
+                    PointerDeviceKind.touch,
+                    PointerDeviceKind.mouse,
+                    PointerDeviceKind.trackpad,
+                  },
+                ),
+                child: Scrollbar(
+                  controller: _stillCtl,
+                  thumbVisibility: true,
+                  child: ListView.builder(
+                    controller: _stillCtl,
+                    scrollDirection: Axis.horizontal,
+                    padding: const EdgeInsets.only(bottom: 16),
+                    itemCount: _stills.length,
+                    itemBuilder: (_, i) => Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: GestureDetector(
+                        onTap: () => _openStill(i),
+                        child: MouseRegion(
+                          cursor: SystemMouseCursors.click,
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(6),
+                            child: _posterImage(_stills[i], cacheWidth: 400),
+                          ),
                         ),
                       ),
-                    ),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(6),
-                      child: _posterImage(_stills[i], cacheWidth: 400),
                     ),
                   ),
                 ),
