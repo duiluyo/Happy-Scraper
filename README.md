@@ -2,7 +2,7 @@
 
 ![Flutter](https://img.shields.io/badge/Framework-Flutter-02569B?logo=flutter)
 ![Dart](https://img.shields.io/badge/Language-Dart-0175C2?logo=dart)
-![Version](https://img.shields.io/badge/Version-1.7.1-green)
+![Version](https://img.shields.io/badge/Version-1.7.2-green)
 ![Platform](https://img.shields.io/badge/Platform-Android%20%7C%20Windows-blue)
 ![Build](https://img.shields.io/badge/Build-GitHub%20Actions-2088FF?logo=github-actions)
 
@@ -184,7 +184,7 @@
 - **统计**：点击 📊 **统计**，查看演员、厂商、类别的影片数量排行，点击某一项即可筛选。
 
 **详情页**（点击影片进入）
-- 大图、标题和原标题、番号、发行日期、时长、导演、演员、类别、厂商、系列、文件路径，以及剧照浏览（点击放大）。
+- 大图、标题和原标题、番号、发行日期、时长、文件大小、导演、演员、类别、厂商、系列、文件路径，以及剧照浏览：剧照栏下方有滚动条，也可以用鼠标拖动；点击剧照放大后，可用左右按钮或键盘 ← → 翻上一张 / 下一张，滚轮缩放。
 - **播放**：用电脑默认的播放器打开，同时自动标记为“已看”；**打开所在文件夹**：在资源管理器中定位到文件。
 - **收藏**、**已看**：右上角按钮切换。记录以番号为准，整理移动文件后也不会丢；只保存在软件自己的文件里，不会写进 NFO。
 - 点击演员、类别、厂商、系列，会回到列表并按它筛选。
@@ -322,6 +322,9 @@
 ## 📝 更新日志
 
 > 每次更新都会在这里记录改动，版本号与 `pubspec.yaml`、软件标题栏保持一致。
+
+### v1.7.2
+- 影视库详情页：显示视频文件大小；剧照放大后可翻上一张 / 下一张（支持键盘 ← →），剧照栏增加滚动条并支持鼠标拖动。
 
 ### v1.7.1
 - **新增 修复图片**：旧版本留下的横版图（如 `SSIS-123.jpg`）会被识别，一键改名为 `SSIS-123-fanart.jpg` 并裁出竖版海报 `SSIS-123-poster.jpg`；不需要联网，可撤销。刮削页面（针对所选文件夹）和影视库（批量）都可使用。
