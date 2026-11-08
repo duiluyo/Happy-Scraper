@@ -2,7 +2,7 @@
 
 ![Flutter](https://img.shields.io/badge/Framework-Flutter-02569B?logo=flutter)
 ![Dart](https://img.shields.io/badge/Language-Dart-0175C2?logo=dart)
-![Version](https://img.shields.io/badge/Version-1.7.2-green)
+![Version](https://img.shields.io/badge/Version-1.8.0-green)
 ![Platform](https://img.shields.io/badge/Platform-Android%20%7C%20Windows-blue)
 ![Build](https://img.shields.io/badge/Build-GitHub%20Actions-2088FF?logo=github-actions)
 
@@ -18,6 +18,7 @@
 - [设置项一览](#-设置项一览)
 - [Windows 电脑版](#-windows-电脑版)
 - [本地影视库](#-本地影视库)
+- [快捷键](#-快捷键)
 - [环境要求与本地构建](#-环境要求与本地构建)
 - [使用 GitHub Actions 云端打包](#-使用-github-actions-云端打包)
 - [使用说明](#-使用说明)
@@ -202,6 +203,22 @@
 
 ---
 
+## ⚡ 快捷键
+
+电脑版支持键盘和鼠标侧键操作：
+
+| 操作 | 作用 |
+| :--- | :--- |
+| `Esc` / `Backspace` / `Alt` + `←` / 鼠标侧键“后退” | 返回上一页（影片详情页、统计页）。在输入框里输入文字时，`Backspace` 只删除字符，不会返回 |
+| `Esc` | 关闭弹窗；在影视库搜索框里按 `Esc` 会清空搜索 |
+| `←` / `→` | 剧照放大后，翻上一张 / 下一张 |
+| `Enter` | 在带输入框的弹窗里确认（修改标题、手动输入番号、选择演员 / 厂商等） |
+| `Ctrl` + `1` / `Ctrl` + `2` | 切换到「刮削」/「影视库」 |
+| `Ctrl` + `F` | 跳到影视库的搜索框 |
+| `F5` / `Ctrl` + `R` | 重新扫描影视库 |
+
+---
+
 ## 🛠️ 环境要求与本地构建
 
 ### 开发环境
@@ -322,6 +339,9 @@
 ## 📝 更新日志
 
 > 每次更新都会在这里记录改动，版本号与 `pubspec.yaml`、软件标题栏保持一致。
+
+### v1.8.0
+- **新增 键盘与鼠标操作（电脑版）**：`Esc`、`Backspace`、`Alt`+`←`、鼠标侧键“后退”可返回上一页；剧照放大后用 `←` `→` 翻页；弹窗里按 `Enter` 确认；`Ctrl`+`1` / `2` 切换页面，`Ctrl`+`F` 搜索，`F5` 重新扫描影视库。详见「快捷键」。
 
 ### v1.7.2
 - 影视库详情页：显示视频文件大小；剧照放大后可翻上一张 / 下一张（支持键盘 ← →），剧照栏增加滚动条并支持鼠标拖动。
