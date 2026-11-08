@@ -20,7 +20,7 @@ import 'package:smb_connect/smb_connect.dart' as smb;
 import 'package:window_manager/legacy.dart';
 
 /// 每次修改代码都要同步修改这里和 pubspec.yaml 里的 version
-const appVersion = '1.8.0';
+const appVersion = '1.8.1';
 
 
 Future<void> main() async {
@@ -2117,8 +2117,21 @@ class LibraryStore extends ChangeNotifier {
       '$stem-thumb.jpg',
       '$stem-cover.jpg',
     ]);
-    it.hasStills = names.containsKey('extrafanart') ||
-        names.containsKey('$stem-extrafanart'.toLowerCase());
+    Future<bool> folderHasImages(String folder) async {
+      try {
+        await for (final entity in Directory(folder).list(followLinks: false)) {
+          if (entity is File &&
+              _imgExts.contains(p.extension(entity.path).toLowerCase())) {
+            return true;
+          }
+        }
+      } catch (_) {}
+      return false;
+    }
+
+    // 空的 extrafanart 文件夹不算有剧照；必须至少存在一张图片。
+    it.hasStills = await folderHasImages(p.join(dir, 'extrafanart')) ||
+        await folderHasImages(p.join(dir, '$stem-extrafanart'));
     return it;
   }
 
@@ -2368,11 +2381,14 @@ Widget _posterImage(String path, {BoxFit fit = BoxFit.cover, int? cacheWidth}) {
 class LibraryPage extends StatefulWidget {
   /// 对一批影片重新刮削（由刮削页面执行）
   final Future<void> Function(List<LibItem> items) onRescrape;
+  /// 只补刮剧照，不改动影片资料文件。
+  final Future<void> Function(List<LibItem> items) onRescrapeStills;
   /// 修复图片后，通知主界面刷新「撤销」按钮
   final VoidCallback onJournalChanged;
   const LibraryPage({
     super.key,
     required this.onRescrape,
+    required this.onRescrapeStills,
     required this.onJournalChanged,
   });
 
@@ -2467,6 +2483,9 @@ class _LibraryPageState extends State<LibraryPage> {
           break;
         case 'imgfix':
           if (!it.needsImageFix) return false;
+          break;
+        case 'nostills':
+          if (it.hasStills) return false;
           break;
         case 'dup':
           if (!dupKeys.contains(it.num)) return false;
@@ -2916,6 +2935,7 @@ class _LibraryPageState extends State<LibraryPage> {
     final list = _filtered();
     final fixable = list.where((e) => !e.hasNfo || e.incomplete).toList();
     final imgfix = list.where((e) => e.needsImageFix).toList();
+    final missingStills = list.where((e) => !e.hasStills).toList();
     const quicks = [
       ['all', '全部'],
       ['fav', '收藏'],
@@ -2923,6 +2943,7 @@ class _LibraryPageState extends State<LibraryPage> {
       ['unscraped', '未刮削'],
       ['incomplete', '缺封面'],
       ['imgfix', '图片待修复'],
+      ['nostills', '缺剧照'],
       ['dup', '重复番号'],
     ];
     return Scaffold(
@@ -3104,6 +3125,20 @@ class _LibraryPageState extends State<LibraryPage> {
                   onPressed: () => _fix(fixable),
                   icon: const Icon(Icons.auto_fix_high),
                   label: Text('补刮当前列表中的 ${fixable.length} 部（未刮削 / 缺封面）'),
+                ),
+              ),
+            ),
+          if (missingStills.isNotEmpty)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Padding(
+                padding: const EdgeInsets.only(left: 8),
+                child: TextButton.icon(
+                  onPressed: libStore.scanning
+                      ? null
+                      : () => widget.onRescrapeStills(missingStills),
+                  icon: const Icon(Icons.photo_library_outlined),
+                  label: Text('一键补刮剧照 ${missingStills.length} 部'),
                 ),
               ),
             ),
@@ -4001,6 +4036,107 @@ class _HomePageState extends State<HomePage> {
         '${ok > 0 ? '（可点右上角 ↩ 撤销）' : ''}');
     if (mounted) setState(() => _running = false);
     if (!Platform.isAndroid) libStore.rescan();
+  }
+
+  /// 影视库专用：只补刮缺失的剧照，不覆盖 NFO / 封面 / 字幕，也不移动视频。
+  Future<void> _rescrapeLibraryStills(List<LibItem> list) async {
+    if (_running || _scanning || list.isEmpty) return;
+    _syncCfg();
+    setState(() {
+      _tab = 0;
+      _running = true;
+      _cancel = false;
+      _done = 0;
+      _total = list.length;
+      _logs.clear();
+      _failed.clear();
+    });
+
+    _log('影片刮削器 v$appVersion');
+    _log('🖼️ 开始为 ${list.length} 部缺少剧照的影片补刮（仅下载剧照）');
+    if (!s.useJavbus && !s.useJavdb) {
+      _log('❌ 请至少在设置中启用 JavBus 或 JavDB；DMM 只提供封面，不提供剧照。');
+      if (mounted) setState(() => _running = false);
+      return;
+    }
+
+    final net = Net(s.proxy);
+    final fs = LocalFs();
+    _cache.clear();
+    var ok = 0, fail = 0, skipped = 0;
+    try {
+      for (final it in list) {
+        if (_cancel) {
+          _log('⏹ 已停止');
+          break;
+        }
+        final num = it.num.isNotEmpty ? it.num : (extractCode(it.path) ?? '');
+        if (num.isEmpty) {
+          fail++;
+          _log('❌ ${it.stem}：无法识别番号');
+          if (mounted) setState(() => _done++);
+          continue;
+        }
+
+        _log('🔎 $num（${p.basename(it.path)}）');
+        try {
+          final tasks = <Future<Partial?>>[];
+          if (s.useJavbus) {
+            tasks.add(_safe(
+                'JavBus', () => scrapeJavbus(net, s.javbusUrl, num)));
+          }
+          if (s.useJavdb) {
+            tasks.add(
+                _safe('JavDB', () => scrapeJavdb(net, s.javdbUrl, num)));
+          }
+          final parts = (await Future.wait(tasks)).whereType<Partial>().toList();
+          final movie = mergeAll(num, parts);
+
+          if (movie.stills.isEmpty) {
+            fail++;
+            _log('   ✖ 已启用的刮削源没有提供剧照');
+          } else {
+            // 保持原有保存规则：影片独立文件夹用 extrafanart；
+            // 未独立整理的影片用「视频文件名-extrafanart」。
+            final folderParts =
+                folderPartsFor(movie, s.folderTpl, it.stem);
+            final ownFolder = _tailMatches(it.dir, folderParts);
+            final stillDir = ownFolder
+                ? p.join(it.dir, 'extrafanart')
+                : p.join(it.dir, '${it.stem}-extrafanart');
+
+            final count = await downloadStills(
+              net,
+              fs,
+              movie.stills,
+              stillDir,
+              s.stillsMax,
+              (path) => _log('   ✓ 已保存：${p.basename(path)}'),
+            );
+            if (count > 0) {
+              ok++;
+              _log('   ✅ 成功下载 $count 张剧照');
+            } else {
+              fail++;
+              _log('   ✖ 没有成功下载剧照（可能是图片源失效或网络问题）');
+            }
+          }
+        } catch (e) {
+          fail++;
+          _log('   ❌ 补刮失败：${errText(e)}');
+        }
+
+        if (mounted) setState(() => _done++);
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+      }
+    } finally {
+      net.close();
+      await fs.close();
+    }
+
+    await libStore.rescan();
+    _log('🎉 剧照补刮结束：成功 $ok 部，失败 $fail 部，跳过 $skipped 部');
+    if (mounted) setState(() => _running = false);
   }
 
   /// 影视库里的「补刮 / 重新刮削」：对选中的影片重新刮削（覆盖已有 NFO 和封面）
@@ -4942,6 +5078,7 @@ class _HomePageState extends State<HomePage> {
                 _buildScrape(context),
                 LibraryPage(
                   onRescrape: _rescrapeLibrary,
+                  onRescrapeStills: _rescrapeLibraryStills,
                   onJournalChanged: _loadJournalInfo,
                 ),
               ],
