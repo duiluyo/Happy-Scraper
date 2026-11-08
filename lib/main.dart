@@ -7,6 +7,7 @@ import 'dart:ui' show PointerDeviceKind;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart' show kBackMouseButton;
 import 'package:flutter/services.dart';
 import 'package:html/dom.dart' as dom;
 import 'package:html/parser.dart' as html_parser;
@@ -19,7 +20,7 @@ import 'package:smb_connect/smb_connect.dart' as smb;
 import 'package:window_manager/legacy.dart';
 
 /// 每次修改代码都要同步修改这里和 pubspec.yaml 里的 version
-const appVersion = '1.7.2';
+const appVersion = '1.8.0';
 
 
 Future<void> main() async {
@@ -2150,6 +2151,9 @@ class LibraryStore extends ChangeNotifier {
 
 final libStore = LibraryStore();
 
+/// 影视库搜索框的焦点（Ctrl+F 用）
+final libSearchFocus = FocusNode();
+
 // ═══════════════════════ 影视库：界面 ═══════════════════════
 
 Future<String?> pickOption(
@@ -2198,6 +2202,9 @@ class _PickDialogState extends State<_PickDialog> {
                 border: OutlineInputBorder(),
               ),
               onChanged: (v) => setState(() => q = v.trim()),
+              onSubmitted: (_) {
+                if (shown.isNotEmpty) Navigator.pop(context, shown[0].key);
+              },
             ),
             const SizedBox(height: 8),
             Expanded(
@@ -2220,6 +2227,51 @@ class _PickDialogState extends State<_PickDialog> {
         TextButton(
             onPressed: () => Navigator.pop(context), child: const Text('取消')),
       ],
+    );
+  }
+}
+
+/// 电脑版：让页面响应“返回”操作 ——
+/// Esc、Backspace、Alt+←、键盘上的“后退”键、鼠标侧面的“后退”键
+class BackKeys extends StatelessWidget {
+  final Widget child;
+  const BackKeys({super.key, required this.child});
+
+  /// 正在输入文字时，Backspace 是删除字符，不要当成返回
+  bool _typing() {
+    final ctx = FocusManager.instance.primaryFocus?.context;
+    if (ctx == null) return false;
+    return ctx.widget is EditableText ||
+        ctx.findAncestorWidgetOfExactType<EditableText>() != null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Listener(
+      onPointerDown: (e) {
+        if (e.kind == PointerDeviceKind.mouse &&
+            (e.buttons & kBackMouseButton) != 0) {
+          Navigator.maybePop(context);
+        }
+      },
+      child: Focus(
+        autofocus: true,
+        onKeyEvent: (node, event) {
+          if (event is! KeyDownEvent) return KeyEventResult.ignored;
+          final k = event.logicalKey;
+          final alt = HardwareKeyboard.instance.isAltPressed;
+          final back = k == LogicalKeyboardKey.escape ||
+              k == LogicalKeyboardKey.browserBack ||
+              (k == LogicalKeyboardKey.backspace && !_typing()) ||
+              (alt && k == LogicalKeyboardKey.arrowLeft);
+          if (back) {
+            Navigator.maybePop(context);
+            return KeyEventResult.handled;
+          }
+          return KeyEventResult.ignored;
+        },
+        child: child,
+      ),
     );
   }
 }
@@ -2256,7 +2308,10 @@ class StatsPage extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      BackKeys(child: _buildBody(context));
+
+  Widget _buildBody(BuildContext context) {
     return DefaultTabController(
       length: 3,
       child: Scaffold(
@@ -2914,15 +2969,28 @@ class _LibraryPageState extends State<LibraryPage> {
             child: Row(
               children: [
                 Expanded(
-                  child: TextField(
-                    controller: _searchCtl,
-                    decoration: const InputDecoration(
-                      hintText: '搜索番号、标题、演员、厂商、系列',
-                      prefixIcon: Icon(Icons.search),
-                      isDense: true,
-                      border: OutlineInputBorder(),
+                  child: Focus(
+                    onKeyEvent: (node, event) {
+                      if (event is KeyDownEvent &&
+                          event.logicalKey == LogicalKeyboardKey.escape) {
+                        _searchCtl.clear();
+                        setState(() => _q = '');
+                        libSearchFocus.unfocus();
+                        return KeyEventResult.handled;
+                      }
+                      return KeyEventResult.ignored;
+                    },
+                    child: TextField(
+                      controller: _searchCtl,
+                      focusNode: libSearchFocus,
+                      decoration: const InputDecoration(
+                        hintText: '搜索番号、标题、演员、厂商、系列（Ctrl+F）',
+                        prefixIcon: Icon(Icons.search),
+                        isDense: true,
+                        border: OutlineInputBorder(),
+                      ),
+                      onChanged: (v) => setState(() => _q = v),
                     ),
-                    onChanged: (v) => setState(() => _q = v),
                   ),
                 ),
                 const SizedBox(width: 12),
@@ -3318,7 +3386,8 @@ class _LibraryDetailPageState extends State<LibraryDetailPage> {
           child: TextField(
             controller: c,
             autofocus: true,
-            maxLines: null,
+            maxLines: 1,
+            onSubmitted: (v) => Navigator.pop(ctx, v),
             decoration: const InputDecoration(border: OutlineInputBorder()),
           ),
         ),
@@ -3378,7 +3447,10 @@ class _LibraryDetailPageState extends State<LibraryDetailPage> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      BackKeys(child: _buildPage(context));
+
+  Widget _buildPage(BuildContext context) {
     final it = widget.item;
     final big = it.fanart.isNotEmpty
         ? it.fanart
@@ -4542,6 +4614,7 @@ class _HomePageState extends State<HomePage> {
           controller: c,
           autofocus: true,
           textCapitalization: TextCapitalization.characters,
+          onSubmitted: (v) => Navigator.pop(dctx, v),
           decoration: const InputDecoration(
             hintText: '例如 MVSD-696',
             border: OutlineInputBorder(),
@@ -4843,7 +4916,7 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     if (Platform.isAndroid) return _buildScrape(context);
-    return Scaffold(
+    return _withShortcuts(Scaffold(
       body: Row(
         children: [
           NavigationRail(
@@ -4876,6 +4949,30 @@ class _HomePageState extends State<HomePage> {
           ),
         ],
       ),
+    ));
+  }
+
+  /// 电脑版快捷键：Ctrl+1 / Ctrl+2 切换页面，Ctrl+F 搜索，F5 / Ctrl+R 重新扫描影视库
+  Widget _withShortcuts(Widget child) {
+    void rescan() {
+      if (_tab == 1) libStore.rescan();
+    }
+
+    return CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.digit1, control: true): () =>
+            setState(() => _tab = 0),
+        const SingleActivator(LogicalKeyboardKey.digit2, control: true): () =>
+            setState(() => _tab = 1),
+        const SingleActivator(LogicalKeyboardKey.f5): rescan,
+        const SingleActivator(LogicalKeyboardKey.keyR, control: true): rescan,
+        const SingleActivator(LogicalKeyboardKey.keyF, control: true): () {
+          setState(() => _tab = 1);
+          WidgetsBinding.instance.addPostFrameCallback(
+              (_) => libSearchFocus.requestFocus());
+        },
+      },
+      child: Focus(autofocus: true, child: child),
     );
   }
 
