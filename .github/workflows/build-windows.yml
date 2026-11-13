@@ -5,6 +5,17 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 与 build-apk.yml 保持一致，固定版本
+  FLUTTER_VERSION: 3.47.9
+
 jobs:
   build:
     runs-on: windows-latest
@@ -16,8 +27,17 @@ jobs:
       - name: 安装 Flutter
         uses: subosito/flutter-action@v2
         with:
-          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
+
+      - name: 读取版本号（单一来源：pubspec.yaml）
+        id: ver
+        shell: pwsh
+        run: |
+          $line = Select-String -Path pubspec.yaml -Pattern '^version:' | Select-Object -First 1
+          $v = ($line.Line -replace '^version:\s*', '') -split '\+' | Select-Object -First 1
+          "name=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "本次版本：$v"
 
       - name: 生成 Windows 工程
         shell: pwsh
@@ -83,7 +103,7 @@ jobs:
         run: flutter pub get
 
       - name: 编译 Windows 正式版
-        run: flutter build windows --release
+        run: flutter build windows --release --dart-define=APP_VERSION=${{ steps.ver.outputs.name }}
 
       - name: 检查编译输出
         shell: pwsh
