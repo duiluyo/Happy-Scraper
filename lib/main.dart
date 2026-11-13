@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 import 'dart:ui' show PointerDeviceKind;
 
 import 'package:file_picker/file_picker.dart';
@@ -19,8 +18,12 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:smb_connect/smb_connect.dart' as smb;
 import 'package:window_manager/legacy.dart';
 
-/// 每次修改代码都要同步修改这里和 pubspec.yaml 里的 version
-const appVersion = '1.8.1';
+/// 版本号单一来源：打包时由 CI 从 pubspec.yaml 读取并注入
+/// `flutter build apk --dart-define=APP_VERSION=1.8.1`
+/// 本地直接 flutter run 时回退到下面的默认值。
+const _appVersionDefault = '1.9.0';
+const appVersion = String.fromEnvironment('APP_VERSION',
+    defaultValue: _appVersionDefault);
 
 
 Future<void> main() async {
@@ -251,33 +254,60 @@ class Cfg {
         'autoLibrary': autoLibrary,
       };
 
+  /// 读配置时逐字段容错。
+  /// 以前是 `(j['x'] ?? d) as String`，只要有一个字段类型不对（用户手改过、
+  /// 旧版本写成了 10.0 之类）就会抛异常，而调用方 catch 之后整份配置回退默认，
+  /// 用户填的镜像地址、代理、SMB 密码全部丢失且没有任何提示。
   void load(Map<String, dynamic> j) {
-    javbusUrl = (j['javbusUrl'] ?? javbusUrl) as String;
-    javdbUrl = (j['javdbUrl'] ?? javdbUrl) as String;
-    proxy = (j['proxy'] ?? proxy) as String;
-    useJavbus = (j['useJavbus'] ?? useJavbus) as bool;
-    useJavdb = (j['useJavdb'] ?? useJavdb) as bool;
-    useDmm = (j['useDmm'] ?? useDmm) as bool;
-    skipExisting = (j['skipExisting'] ?? skipExisting) as bool;
-    downloadCover = (j['downloadCover'] ?? downloadCover) as bool;
-    organize = (j['organize'] ?? organize) as bool;
-    folderMode = (j['folderMode'] ?? folderMode) as String;
-    downloadSub = (j['downloadSub'] ?? downloadSub) as bool;
-    subUrl = (j['subUrl'] ?? subUrl) as String;
-    themeMode = (j['themeMode'] ?? themeMode) as String;
-    keepAwake = (j['keepAwake'] ?? keepAwake) as bool;
-    source = (j['source'] ?? source) as String;
-    smbHost = (j['smbHost'] ?? smbHost) as String;
-    smbUser = (j['smbUser'] ?? smbUser) as String;
-    smbPass = (j['smbPass'] ?? smbPass) as String;
-    smbDomain = (j['smbDomain'] ?? smbDomain) as String;
-    smbPath = (j['smbPath'] ?? smbPath) as String;
-    downloadStills = (j['downloadStills'] ?? downloadStills) as bool;
-    stillsMax = (j['stillsMax'] ?? stillsMax) as int;
-    translate = (j['translate'] ?? translate) as bool;
-    trLang = (j['trLang'] ?? trLang) as String;
-    organizeBase = (j['organizeBase'] ?? organizeBase) as String;
-    if (j['folderTpl'] is String) {
+    String str(String k, String d) {
+      final v = j[k];
+      if (v is String) return v;
+      if (v == null) return d;
+      return v.toString();
+    }
+
+    bool flag(String k, bool d) {
+      final v = j[k];
+      if (v is bool) return v;
+      if (v is num) return v != 0;
+      if (v is String) return v.toLowerCase() == 'true' || v == '1';
+      return d;
+    }
+
+    int intVal(String k, int d) {
+      final v = j[k];
+      if (v is int) return v;
+      if (v is num) return v.toInt();
+      if (v is String) return int.tryParse(v.trim()) ?? d;
+      return d;
+    }
+
+    javbusUrl = str('javbusUrl', javbusUrl);
+    javdbUrl = str('javdbUrl', javdbUrl);
+    proxy = str('proxy', proxy);
+    useJavbus = flag('useJavbus', useJavbus);
+    useJavdb = flag('useJavdb', useJavdb);
+    useDmm = flag('useDmm', useDmm);
+    skipExisting = flag('skipExisting', skipExisting);
+    downloadCover = flag('downloadCover', downloadCover);
+    organize = flag('organize', organize);
+    folderMode = str('folderMode', folderMode);
+    downloadSub = flag('downloadSub', downloadSub);
+    subUrl = str('subUrl', subUrl);
+    themeMode = str('themeMode', themeMode);
+    keepAwake = flag('keepAwake', keepAwake);
+    source = str('source', source);
+    smbHost = str('smbHost', smbHost);
+    smbUser = str('smbUser', smbUser);
+    smbPass = str('smbPass', smbPass);
+    smbDomain = str('smbDomain', smbDomain);
+    smbPath = str('smbPath', smbPath);
+    downloadStills = flag('downloadStills', downloadStills);
+    stillsMax = intVal('stillsMax', stillsMax);
+    translate = flag('translate', translate);
+    trLang = str('trLang', trLang);
+    organizeBase = str('organizeBase', organizeBase);
+    if (j['folderTpl'] is String && (j['folderTpl'] as String).isNotEmpty) {
       folderTpl = j['folderTpl'] as String;
     } else {
       // 兼容旧版本的三种固定命名方式
@@ -285,7 +315,7 @@ class Cfg {
       if (fm == 'numTitle') folderTpl = '{番号} {标题}';
       if (fm == 'orig') folderTpl = '{原文件名}';
     }
-    autoLibrary = (j['autoLibrary'] ?? autoLibrary) as bool;
+    autoLibrary = flag('autoLibrary', autoLibrary);
   }
 }
 
@@ -307,10 +337,17 @@ class Net {
         .replaceFirst(RegExp(r'^[a-zA-Z]+://'), '')
         .replaceAll(RegExp(r'/+$'), '');
     if (px.isNotEmpty) {
+      proxyHint = px.toLowerCase().startsWith('socks')
+          ? '地址看起来是 SOCKS 代理，本软件只支持 HTTP 代理；'
+              '请填 Clash / V2Ray 的 HTTP 端口（一般也是 7890）'
+          : null;
       hc.findProxy = (uri) => 'PROXY $px';
     }
     _client = IOClient(hc);
   }
+
+  /// 代理地址格式有问题时给出的说明（「测试连接」会显示）
+  String? proxyHint;
 
   void close() => _client.close();
 
@@ -323,30 +360,66 @@ class Net {
       if (extra != null) ...extra,
     };
     Object? last;
+    StackTrace? lastStack;
     for (var i = 0; i < tries; i++) {
       try {
         return await _client
             .get(uri, headers: headers)
             .timeout(timeout);
-      } catch (e) {
+      } catch (e, st) {
         last = e;
+        lastStack = st;
+        // 两次尝试之间退避一下：立刻重发对限流站点没用，还更容易被封
+        if (i + 1 < tries) {
+          await Future<void>.delayed(Duration(milliseconds: 400 * (i + 1)));
+        }
       }
     }
-    throw last!;
+    // 保留原始堆栈：裸 throw 会把调用栈丢掉，排查时只剩下一个 message
+    Error.throwWithStackTrace(last!, lastStack ?? StackTrace.current);
   }
 }
 
 String decodeBody(http.Response r) =>
     utf8.decode(r.bodyBytes, allowMalformed: true);
 
-bool looksBlocked(String body) =>
-    body.contains('Just a moment') ||
-    body.contains('cf-browser-verification') ||
-    body.contains('Attention Required');
+/// 判断返回的页面是不是「被 Cloudflare 之类的防护页拦了」
+/// 只用关键词，不追求完备——命中就提示用户换镜像或开代理。
+bool looksBlocked(String body) {
+  final s = body.length > 20000 ? body.substring(0, 20000) : body;
+  const keys = [
+    'Just a moment',
+    'cf-browser-verification',
+    'cf-chl',
+    'Attention Required',
+    'Enable JavaScript and cookies to continue',
+    'Checking your browser before accessing',
+    'Ray ID',
+    'Access denied',
+  ];
+  final low = s.toLowerCase();
+  for (final k in keys) {
+    if (low.contains(k.toLowerCase())) return true;
+  }
+  return false;
+}
 
 String trimSlash(String s) => s.trim().replaceAll(RegExp(r'/+$'), '');
 
+/// 刮削过程里"可预期"的错误：HTTP 状态不对、被 Cloudflare 拦了、页面结构变了……
+///
+/// 以前这些地方都是 `throw '字符串'`。抛字符串会丢掉调用栈，也没法按类型区分，
+/// 上层只能靠 `toString()` 猜。`toString()` 保持返回原文，所以日志输出不变。
+class ScrapeException implements Exception {
+  final String message;
+  const ScrapeException(this.message);
+
+  @override
+  String toString() => message;
+}
+
 String errText(Object e) {
+  if (e is ScrapeException) return e.message;
   if (e is TimeoutException) return '超时（网络慢，或需要代理）';
   if (e is SocketException || e is http.ClientException) {
     return '连接失败（可能需要代理）';
@@ -512,12 +585,12 @@ Future<Partial?> scrapeJavbus(Net net, String baseUrl, String num) async {
   final r = await net
       .get(url, extra: {'Cookie': 'existmag=all; age=verified; dv=1'});
   if (r.statusCode == 404) return null;
-  if (r.statusCode != 200) throw 'HTTP ${r.statusCode}';
+  if (r.statusCode != 200) throw ScrapeException('HTTP ${r.statusCode}');
   final body = decodeBody(r);
-  if (looksBlocked(body)) throw '被网站拦截（Cloudflare）';
+  if (looksBlocked(body)) throw const ScrapeException('被网站拦截（Cloudflare）');
   final doc = html_parser.parse(body);
   final h3 = doc.querySelector('div.container h3');
-  if (h3 == null) throw '页面结构不符（可能被拦截，或需要代理）';
+  if (h3 == null) throw const ScrapeException('页面结构不符（可能被拦截，或需要代理）');
 
   final out = Partial('JavBus')..url = url;
   var title = h3.text.trim();
@@ -573,9 +646,9 @@ Future<Partial?> scrapeJavdb(Net net, String baseUrl, String num) async {
   final sr = await net.get(
       '$base/search?q=${Uri.encodeQueryComponent(num)}&f=all',
       extra: ck);
-  if (sr.statusCode != 200) throw '搜索页 HTTP ${sr.statusCode}';
+  if (sr.statusCode != 200) throw ScrapeException('搜索页 HTTP ${sr.statusCode}');
   final sbody = decodeBody(sr);
-  if (looksBlocked(sbody)) throw '被网站拦截（Cloudflare）';
+  if (looksBlocked(sbody)) throw const ScrapeException('被网站拦截（Cloudflare）');
   final sdoc = html_parser.parse(sbody);
 
   String? href;
@@ -590,15 +663,15 @@ Future<Partial?> scrapeJavdb(Net net, String baseUrl, String num) async {
 
   final durl = Uri.parse('$base/').resolve(href).toString();
   final dr = await net.get(durl, extra: ck);
-  if (dr.statusCode != 200) throw '详情页 HTTP ${dr.statusCode}';
+  if (dr.statusCode != 200) throw ScrapeException('详情页 HTTP ${dr.statusCode}');
   final dbody = decodeBody(dr);
-  if (looksBlocked(dbody)) throw '被网站拦截（Cloudflare）';
+  if (looksBlocked(dbody)) throw const ScrapeException('被网站拦截（Cloudflare）');
   final doc = html_parser.parse(dbody);
 
   final out = Partial('JavDB')..url = durl;
   out.title =
       doc.querySelector('h2.title strong.current-title')?.text.trim() ?? '';
-  if (out.title.isEmpty) throw '详情页结构不符';
+  if (out.title.isEmpty) throw const ScrapeException('详情页结构不符');
 
   final coverSrc = doc.querySelector('img.video-cover')?.attributes['src'] ??
       doc.querySelector('.column-video-cover img')?.attributes['src'] ??
@@ -676,7 +749,9 @@ Future<(Uint8List, String)?> fetchCover(
     try {
       final r = await net.get(u);
       final b = r.bodyBytes;
-      if (r.statusCode == 200 && b.length > 5000 && _isImage(b)) {
+      // 只要 HTTP 200 + 真的是张图就收下。原来还用 >5000 字节做过滤，
+      // 会把正常的小尺寸封面误判成失败；_isImage 已经在校验文件头了。
+      if (r.statusCode == 200 && b.length > 512 && _isImage(b)) {
         return (b, u);
       }
       fails.add('HTTP ${r.statusCode}（${b.length}字节）${_short(u)}');
@@ -716,7 +791,10 @@ String safeName(String s, {int max = 80}) {
       .replaceAll(RegExp(r'[\\/:*?"<>|\r\n\t]'), ' ')
       .replaceAll(RegExp(r'\s+'), ' ')
       .trim();
-  if (t.length > max) t = t.substring(0, max).trim();
+  // 按码点截断，避免把 emoji 之类的代理对从中间切断（会得到非法 UTF-16）
+  if (t.runes.length > max) {
+    t = String.fromCharCodes(t.runes.take(max)).trim();
+  }
   t = t.replaceAll(RegExp(r'[. ]+$'), '');
   return t;
 }
@@ -760,29 +838,18 @@ List<String> folderPartsFor(Movie m, String template, String origStem) {
 }
 
 /// 目录 dir 的末尾几层是否正好等于 parts（说明已经在对应的文件夹里了）
+///
+/// 注意：这里必须用 p.equals 而不是 `!=`。Windows 文件系统不区分大小写，
+/// 目录已经是 `ssis-123`、模板生成 `SSIS-123` 时，字符串比较会判为"不相等"，
+/// 结果每跑一次就在里面再套一层 `SSIS-123/`。
 bool _tailMatches(String dir, List<String> parts) {
   final segs = p.split(dir);
   if (segs.length < parts.length) return false;
   final tail = segs.sublist(segs.length - parts.length);
   for (var i = 0; i < parts.length; i++) {
-    if (tail[i] != parts[i]) return false;
+    if (!p.equals(tail[i], parts[i])) return false;
   }
   return true;
-}
-
-Future<File> moveFile(File f, String newPath) async {
-  if (p.equals(f.path, newPath)) return f;
-  if (File(newPath).existsSync()) {
-    throw '目标已存在同名文件：${p.basename(newPath)}';
-  }
-  try {
-    return await f.rename(newPath);
-  } catch (_) {
-    // 跨存储卡时 rename 会失败，改为复制后删除
-    final c = await f.copy(newPath);
-    await f.delete();
-    return c;
-  }
 }
 
 /// 把视频和它的同名附属文件（字幕、旧 NFO、海报等）移进 destDir，
@@ -811,7 +878,7 @@ Future<String> organizeInto(Fs fs, String video, String destDir,
 
   final newVideo = p.join(destDir, p.basename(video));
   if (await fs.exists(newVideo)) {
-    throw '目标已存在同名文件：${p.basename(newVideo)}';
+    throw ScrapeException('目标已存在同名文件：${p.basename(newVideo)}');
   }
   await fs.move(video, newVideo);
   moves?.add([video, newVideo]);
@@ -859,9 +926,9 @@ Future<(Uint8List, String)?> fetchSubtitle(
   final base = trimSlash(baseUrl);
   final sr = await net
       .get('$base/index.php?search=${Uri.encodeQueryComponent(num)}');
-  if (sr.statusCode != 200) throw '字幕站搜索 HTTP ${sr.statusCode}';
+  if (sr.statusCode != 200) throw ScrapeException('字幕站搜索 HTTP ${sr.statusCode}');
   final sbody = decodeBody(sr);
-  if (looksBlocked(sbody)) throw '字幕站被拦截（Cloudflare）';
+  if (looksBlocked(sbody)) throw const ScrapeException('字幕站被拦截（Cloudflare）');
   final sdoc = html_parser.parse(sbody);
 
   final key = num.toUpperCase();
@@ -1213,7 +1280,7 @@ Future<String?> _googleTr(Net net, String text, String to, String from) async {
   final url = 'https://translate.googleapis.com/translate_a/single'
       '?client=gtx&sl=$from&tl=$to&dt=t&q=${Uri.encodeQueryComponent(text)}';
   final r = await net.get(url);
-  if (r.statusCode != 200) throw 'HTTP ${r.statusCode}';
+  if (r.statusCode != 200) throw ScrapeException('HTTP ${r.statusCode}');
   final j = jsonDecode(utf8.decode(r.bodyBytes)) as List;
   final segs = j[0] as List;
   return segs.map((e) => ((e as List)[0] ?? '').toString()).join();
@@ -1223,7 +1290,7 @@ Future<String?> _myMemoryTr(Net net, String text, String to) async {
   final lp = Uri.encodeQueryComponent('ja|$to');
   final r = await net.get('https://api.mymemory.translated.net/get'
       '?q=${Uri.encodeQueryComponent(text)}&langpair=$lp');
-  if (r.statusCode != 200) throw 'HTTP ${r.statusCode}';
+  if (r.statusCode != 200) throw ScrapeException('HTTP ${r.statusCode}');
   final j = jsonDecode(utf8.decode(r.bodyBytes)) as Map;
   final t = (j['responseData'] as Map?)?['translatedText'];
   return t?.toString();
@@ -1853,6 +1920,7 @@ class LibraryStore extends ChangeNotifier {
   bool scanning = false;
   String scanMsg = '';
   bool loaded = false;
+  int pageSize = 50; // 影视库每页显示数量，0 = 全部
 
   String get _indexFile => p.join(_dataDir, 'library.json');
   String get _stateFile => p.join(_dataDir, 'library_state.json');
@@ -1876,6 +1944,8 @@ class LibraryStore extends ChangeNotifier {
       final f = File(_stateFile);
       if (f.existsSync()) {
         final j = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
+        final ps = j['pageSize'];
+        if (ps is int && ps >= 0) pageSize = ps;
         favs
           ..clear()
           ..addAll((j['fav'] as List).cast<String>());
@@ -1903,8 +1973,18 @@ class LibraryStore extends ChangeNotifier {
       final f = File(_stateFile);
       await f.parent.create(recursive: true);
       await f.writeAsString(
-          jsonEncode({'fav': favs.toList(), 'seen': seen.toList()}));
+          jsonEncode({
+        'fav': favs.toList(),
+        'seen': seen.toList(),
+        'pageSize': pageSize,
+      }));
     } catch (_) {}
+  }
+
+  void setPageSize(int n) {
+    pageSize = n < 0 ? 0 : n;
+    _saveState();
+    notifyListeners();
   }
 
   bool isFav(LibItem it) => favs.contains(it.key);
@@ -2371,6 +2451,8 @@ Widget _posterImage(String path, {BoxFit fit = BoxFit.cover, int? cacheWidth}) {
     File(path),
     fit: fit,
     cacheWidth: cacheWidth,
+    // 换筛选 / 重新排序时，同一张图不要先闪成空白再出现
+    gaplessPlayback: true,
     errorBuilder: (_, __, ___) => Container(
       color: Colors.black12,
       child: const Center(child: Icon(Icons.broken_image)),
@@ -2403,11 +2485,16 @@ class _LibraryPageState extends State<LibraryPage> {
   bool _grid = true;
   String _quick = 'all'; // all fav unseen unscraped incomplete dup
   String? _actor, _genre, _studio, _series, _year;
+  int _page = 1; // 当前页（从 1 开始）
+  int _lastPages = 1;
+  String _lastSig = ''; // 筛选条件变了就回到第 1 页
+  final _scrollCtl = ScrollController();
 
   @override
   void initState() {
     super.initState();
     libStore.addListener(_onStore);
+    libPageHook = _step;
     libStore.load().then((_) {
       if (libStore.folders.isNotEmpty) libStore.rescan();
     });
@@ -2416,6 +2503,8 @@ class _LibraryPageState extends State<LibraryPage> {
   @override
   void dispose() {
     libStore.removeListener(_onStore);
+    if (libPageHook == _step) libPageHook = null;
+    _scrollCtl.dispose();
     _searchCtl.dispose();
     super.dispose();
   }
@@ -2665,7 +2754,7 @@ class _LibraryPageState extends State<LibraryPage> {
                 if (d != null) {
                   final added = await libStore.addFolder(d);
                   setM(() {});
-                  if (added) libStore.rescan();
+                  if (added) unawaited(libStore.rescan());
                 }
               },
               child: const Text('添加文件夹'),
@@ -2754,7 +2843,7 @@ class _LibraryPageState extends State<LibraryPage> {
     if (yes != true || !mounted) return;
 
     final progress = ValueNotifier<String>('准备中…');
-    showDialog(
+    unawaited(showDialog(
       context: context,
       barrierDismissible: false,
       builder: (_) => AlertDialog(
@@ -2764,7 +2853,7 @@ class _LibraryPageState extends State<LibraryPage> {
           builder: (_, v, __) => Text(v),
         ),
       ),
-    );
+    ));
 
     final fs = LocalFs();
     final batch = <String, dynamic>{
@@ -2930,9 +3019,122 @@ class _LibraryPageState extends State<LibraryPage> {
     );
   }
 
+  void _scrollTop() {
+    if (_scrollCtl.hasClients) _scrollCtl.jumpTo(0);
+  }
+
+  void _go(int page) {
+    setState(() => _page = page);
+    _scrollTop();
+  }
+
+  /// 键盘翻页：delta = -1 上一页，1 下一页
+  void _step(int delta) {
+    if (!mounted) return;
+    final np = (_page + delta).clamp(1, _lastPages).toInt();
+    if (np != _page) _go(np);
+  }
+
+  Future<void> _jumpDialog(int pages) async {
+    final c = TextEditingController(text: '$_page');
+    final v = await showDialog<int>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('跳转到第几页（共 $pages 页）'),
+        content: TextField(
+          controller: c,
+          autofocus: true,
+          keyboardType: TextInputType.number,
+          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+          decoration: const InputDecoration(border: OutlineInputBorder()),
+          onSubmitted: (t) => Navigator.pop(ctx, int.tryParse(t)),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, int.tryParse(c.text)),
+              child: const Text('跳转')),
+        ],
+      ),
+    );
+    if (v != null && mounted) _go(v.clamp(1, pages).toInt());
+  }
+
+  /// 底部的分页栏：每页数量、首页 / 上一页 / 页码 / 下一页 / 末页
+  Widget _pagerBar(int total, ({int pages, int page, int start, int end}) pg) {
+    final size = libStore.pageSize;
+    final sizes = <int>{30, 50, 100, 200, 0, size}.toList()
+      ..sort((a, b) => (a == 0 ? 1 << 30 : a).compareTo(b == 0 ? 1 << 30 : b));
+    final multi = pg.pages > 1;
+    return Material(
+      elevation: 2,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        child: Wrap(
+          alignment: WrapAlignment.center,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: 8,
+          children: [
+            Text('共 $total 部，本页 ${pg.start + 1}–${pg.end}　每页'),
+            DropdownButton<int>(
+              value: size,
+              underline: const SizedBox(),
+              items: [
+                for (final n in sizes)
+                  DropdownMenuItem(value: n, child: Text(n == 0 ? '全部' : '$n')),
+              ],
+              onChanged: (v) {
+                if (v == null) return;
+                libStore.setPageSize(v);
+                _go(1);
+              },
+            ),
+            if (multi) ...[
+              IconButton(
+                tooltip: '首页',
+                icon: const Icon(Icons.first_page),
+                onPressed: pg.page > 1 ? () => _go(1) : null,
+              ),
+              IconButton(
+                tooltip: '上一页（Ctrl+←）',
+                icon: const Icon(Icons.chevron_left),
+                onPressed: pg.page > 1 ? () => _go(pg.page - 1) : null,
+              ),
+              TextButton(
+                onPressed: () => _jumpDialog(pg.pages),
+                child: Text('第 ${pg.page} / ${pg.pages} 页'),
+              ),
+              IconButton(
+                tooltip: '下一页（Ctrl+→）',
+                icon: const Icon(Icons.chevron_right),
+                onPressed: pg.page < pg.pages ? () => _go(pg.page + 1) : null,
+              ),
+              IconButton(
+                tooltip: '末页',
+                icon: const Icon(Icons.last_page),
+                onPressed: pg.page < pg.pages ? () => _go(pg.pages) : null,
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final list = _filtered();
+    // 搜索 / 筛选 / 排序条件变了，回到第 1 页
+    final sig = '$_q|$_sort|$_quick|$_actor|$_genre|$_studio|$_series|$_year';
+    if (sig != _lastSig) {
+      _lastSig = sig;
+      _page = 1;
+    }
+    final pg = paginate(list.length, _page, libStore.pageSize);
+    _page = pg.page;
+    _lastPages = pg.pages;
+    final pageItems = list.sublist(pg.start, pg.end);
     final fixable = list.where((e) => !e.hasNfo || e.incomplete).toList();
     final imgfix = list.where((e) => e.needsImageFix).toList();
     final missingStills = list.where((e) => !e.hasStills).toList();
@@ -3163,25 +3365,46 @@ class _LibraryPageState extends State<LibraryPage> {
                         child: Text(libStore.scanning ? '正在扫描…' : '没有符合条件的影片'))
                     : (_grid
                         ? GridView.builder(
+                            controller: _scrollCtl,
                             padding: const EdgeInsets.all(8),
                             gridDelegate:
                                 const SliverGridDelegateWithMaxCrossAxisExtent(
                               maxCrossAxisExtent: 190,
                               mainAxisExtent: 330,
                             ),
-                            itemCount: list.length,
-                            itemBuilder: (_, i) => _card(list[i]),
+                            itemCount: pageItems.length,
+                            itemBuilder: (_, i) => _card(pageItems[i]),
                           )
                         : ListView.builder(
-                            itemCount: list.length,
-                            itemBuilder: (_, i) => _tile(list[i]),
+                            controller: _scrollCtl,
+                            itemCount: pageItems.length,
+                            itemBuilder: (_, i) => _tile(pageItems[i]),
                           )),
           ),
+          if (libStore.folders.isNotEmpty && list.isNotEmpty)
+            _pagerBar(list.length, pg),
         ],
       ),
     );
   }
 }
+
+/// 分页计算。page 从 1 开始；size <= 0 表示不分页（全部显示）。
+/// 页码越界会被修正；没有数据时也返回第 1 页，范围为空。
+({int pages, int page, int start, int end}) paginate(
+    int total, int page, int size) {
+  if (size <= 0 || total <= 0) {
+    return (pages: 1, page: 1, start: 0, end: total < 0 ? 0 : total);
+  }
+  final pages = (total + size - 1) ~/ size;
+  final pg = page < 1 ? 1 : (page > pages ? pages : page);
+  final start = (pg - 1) * size;
+  final end = start + size > total ? total : start + size;
+  return (pages: pages, page: pg, start: start, end: end);
+}
+
+/// 影视库翻页的键盘快捷键钩子（Ctrl+← / Ctrl+→），由影视库页面设置
+void Function(int delta)? libPageHook;
 
 /// 把字节数显示成 B / KB / MB / GB
 String fmtSize(int bytes) {
@@ -3691,6 +3914,9 @@ class _HomePageState extends State<HomePage> {
   final _smbDomainCtl = TextEditingController();
   final _tplCtl = TextEditingController();
   final _logs = <String>[];
+  static const _logMax = 3000; // 只保留最近 3000 行，避免大批量时内存无限涨
+  Timer? _logTimer;
+  bool _logDirty = false;
   final _scroll = ScrollController();
   bool _running = false;
   bool _cancel = false;
@@ -3731,6 +3957,7 @@ class _HomePageState extends State<HomePage> {
     _smbDomainCtl.dispose();
     _tplCtl.dispose();
     _scroll.dispose();
+    _logTimer?.cancel();
     super.dispose();
   }
 
@@ -3752,12 +3979,10 @@ class _HomePageState extends State<HomePage> {
       if (!f.existsSync()) return;
       final j = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
       if (!mounted) return;
-      setState(() {
-        s.load(j);
-        if (!Platform.isAndroid) s.source = 'local';
-        themeNotifier.value = themeFromString(s.themeMode);
-        _applyCtl();
-      });
+      s.load(j); // 副作用放在 setState 外面
+      if (!Platform.isAndroid) s.source = 'local';
+      themeNotifier.value = themeFromString(s.themeMode);
+      setState(_applyCtl);
     } catch (_) {}
   }
 
@@ -3782,13 +4007,26 @@ class _HomePageState extends State<HomePage> {
     } catch (_) {}
   }
 
+  /// 写一条日志。
+  /// 原来是每条都 setState（刮 500 部就是 5000 次整页重建），
+  /// 现在攒 80ms 合并刷新一次，滚动到底部也只在真正刷新后做。
   void _log(String t) {
     if (!mounted) return;
-    setState(() => _logs.add(t));
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scroll.hasClients) {
-        _scroll.jumpTo(_scroll.position.maxScrollExtent);
-      }
+    _logs.add(t);
+    if (_logs.length > _logMax) {
+      _logs.removeRange(0, _logs.length - _logMax);
+    }
+    _logDirty = true;
+    _logTimer ??= Timer(const Duration(milliseconds: 80), () {
+      _logTimer = null;
+      if (!mounted || !_logDirty) return;
+      _logDirty = false;
+      setState(() {});
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_scroll.hasClients) {
+          _scroll.jumpTo(_scroll.position.maxScrollExtent);
+        }
+      });
     });
   }
 
@@ -3845,7 +4083,12 @@ class _HomePageState extends State<HomePage> {
     if (c is List) c.add(path);
   }
 
-  Future<void> _commitBatch() async {
+  DateTime _lastJournalWrite = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// 把当前批次写进撤销记录。
+  /// 原来每成功一部就整份重写 journal.json（刮 500 部 = 500 次全量读写），
+  /// 现在最多每 5 秒落盘一次，批次结束时用 force 强写一次。
+  Future<void> _commitBatch({bool force = false}) async {
     final b = _batch;
     if (b == null) return;
     final has =
@@ -3853,7 +4096,11 @@ class _HomePageState extends State<HomePage> {
     final all = await loadJournal();
     all.removeWhere((e) => e['id'] == b['id']);
     if (has) all.add(b);
-    await saveJournal(all);
+    final now = DateTime.now();
+    if (force || now.difference(_lastJournalWrite).inSeconds >= 5) {
+      _lastJournalWrite = now;
+      await saveJournal(all);
+    }
     if (mounted) setState(() => _undoCount = all.length);
   }
 
@@ -3901,6 +4148,9 @@ class _HomePageState extends State<HomePage> {
     final px = s.proxy.trim();
     if (px.isNotEmpty) {
       checks.add(DiagCheck('代理 $px', (net) async {
+        // 填成 socks:// 时代理服务本身是通的，但本软件只会按 HTTP 代理使用，
+        // 端口能连上会给出"正常"的错觉，这里直接点明。
+        if (net.proxyHint != null) return (false, net.proxyHint!);
         final hp = px
             .replaceFirst(RegExp(r'^[a-zA-Z]+://'), '')
             .replaceAll(RegExp(r'/+$'), '');
@@ -4029,13 +4279,13 @@ class _HomePageState extends State<HomePage> {
       if (mounted) setState(() => _done++);
       await Future<void>.delayed(Duration.zero);
     }
-    await _commitBatch();
+    await _commitBatch(force: true);
     _batch = null;
     await fsys.close();
     _log('🎉 完成：已修复 $ok，无需处理 $skip，失败/无图 $fail'
         '${ok > 0 ? '（可点右上角 ↩ 撤销）' : ''}');
     if (mounted) setState(() => _running = false);
-    if (!Platform.isAndroid) libStore.rescan();
+    if (!Platform.isAndroid) unawaited(libStore.rescan());
   }
 
   /// 影视库专用：只补刮缺失的剧照，不覆盖 NFO / 封面 / 字幕，也不移动视频。
@@ -4063,7 +4313,7 @@ class _HomePageState extends State<HomePage> {
     final net = Net(s.proxy);
     final fs = LocalFs();
     _cache.clear();
-    var ok = 0, fail = 0, skipped = 0;
+    var ok = 0, fail = 0;
     try {
       for (final it in list) {
         if (_cancel) {
@@ -4135,7 +4385,7 @@ class _HomePageState extends State<HomePage> {
     }
 
     await libStore.rescan();
-    _log('🎉 剧照补刮结束：成功 $ok 部，失败 $fail 部，跳过 $skipped 部');
+    _log('🎉 剧照补刮结束：成功 $ok 部，失败 $fail 部');
     if (mounted) setState(() => _running = false);
   }
 
@@ -4197,12 +4447,12 @@ class _HomePageState extends State<HomePage> {
       _rootOverride = null;
       _recOn = true;
     }
-    await _commitBatch();
+    await _commitBatch(force: true);
     _batch = null;
     _log('🎉 完成：成功 $ok，失败 $fail'
         '${_failed.isNotEmpty ? '（可点下方按钮手动输入番号重试）' : ''}');
     if (mounted) setState(() => _running = false);
-    libStore.rescan();
+    unawaited(libStore.rescan());
   }
 
   /// 返回 0=成功 1=跳过 2=失败
@@ -4536,7 +4786,7 @@ class _HomePageState extends State<HomePage> {
 
     _log('📂 $root'
         '${subsOnly ? '（只下载字幕）' : dry ? '（试运行，不会改动任何文件）' : ''}');
-    if (Platform.isAndroid && s.keepAwake) keepAwake(true);
+    if (Platform.isAndroid && s.keepAwake) unawaited(keepAwake(true));
 
     final files = List<String>.of(_files);
     if (mounted) setState(() => _total = files.length);
@@ -4574,9 +4824,9 @@ class _HomePageState extends State<HomePage> {
       }
     } finally {
       net.close();
-      keepAwake(false);
+      unawaited(keepAwake(false));
     }
-    await _commitBatch();
+    await _commitBatch(force: true);
     _batch = null;
 
     // 整理后文件位置会变，重新扫描一遍，保证下次操作的列表是最新的
@@ -4595,7 +4845,7 @@ class _HomePageState extends State<HomePage> {
         kind == 'local' &&
         ok > 0) {
       final added = await libStore.addFolder(root);
-      libStore.rescan();
+      unawaited(libStore.rescan());
       if (added) _log('📚 已把这个文件夹加入影视库');
     }
 
@@ -4654,35 +4904,55 @@ class _HomePageState extends State<HomePage> {
     try {
       fs = await _openFs(kind);
       final f = fs;
-      for (final c in created) {
-        try {
-          if (await f.exists(c)) await f.delete(c);
-        } catch (_) {}
-      }
-      var back = 0, miss = 0;
+
+      // ① 先把文件移回原位。
+      //    顺序很重要：不能先删生成的 NFO / 封面 / 字幕，否则一旦移回失败，
+      //    就会留下「元数据已经没了、视频还在整理后的文件夹里」的半损坏状态。
+      final pending = <List<String>>[];
+      var back = 0;
       for (final mv in moves.reversed) {
         final from = mv[0], to = mv[1];
         try {
           if (!await f.exists(to) || await f.exists(from)) {
-            miss++;
+            pending.add(mv);
             continue;
           }
           await f.mkdirs(p.dirname(from));
           await f.move(to, from);
           back++;
         } catch (e) {
-          miss++;
+          pending.add(mv);
           _log('   ⚠️ ${p.basename(to)} 无法移回：${errText(e)}');
         }
       }
-      for (final d in dirs.reversed) {
-        try {
-          if (await f.exists(d) && (await f.list(d)).isEmpty) {
-            await f.delete(d);
-          }
-        } catch (_) {}
+
+      // ② 只有全部移回成功，才清理这次生成的文件和新建的空文件夹
+      if (pending.isEmpty) {
+        for (final c in created) {
+          try {
+            if (await f.exists(c)) await f.delete(c);
+          } catch (_) {}
+        }
+        for (final d in dirs.reversed) {
+          try {
+            if (await f.exists(d) && (await f.list(d)).isEmpty) {
+              await f.delete(d);
+            }
+          } catch (_) {}
+        }
+        all.removeLast();
+      } else {
+        // ③ 有文件没移回：保留这条记录，只把还没移回的部分留下。
+        //    created / dirs 原样保留——这次一个生成物都不删，等下一次
+        //    （全部移回成功的那次）再统一清理，避免留下对不上号的孤儿文件。
+        all[all.length - 1] = <String, dynamic>{
+          ...b,
+          'label': '${b['label']}（未完成，还有 ${pending.length} 个文件没移回）',
+          'moves': pending.reversed.toList(),
+          'created': created,
+          'dirs': dirs,
+        };
       }
-      all.removeLast();
       await saveJournal(all);
       if (_selDir != null && _selKind == kind) {
         try {
@@ -4690,8 +4960,13 @@ class _HomePageState extends State<HomePage> {
           if (mounted) setState(() => _files = fresh);
         } catch (_) {}
       }
-      _log('↩ 已撤销：移回 $back 个文件'
-          '${miss > 0 ? '，$miss 个没法移回（已不在原处，或原位置已有同名文件）' : ''}');
+      if (pending.isEmpty) {
+        _log('↩ 已撤销：移回 $back 个文件');
+      } else {
+        _log('↩ 部分撤销：移回 $back 个文件，${pending.length} 个没法移回'
+            '（已不在原处，或原位置已有同名文件）。\n'
+            '   记录已保留，排除问题后再点一次 ↩ 撤销即可继续。');
+      }
       if (mounted) setState(() => _undoCount = all.length);
     } catch (e) {
       _log('❌ 撤销失败：${errText(e)}');
@@ -4730,7 +5005,7 @@ class _HomePageState extends State<HomePage> {
       net.close();
       await fs?.close();
     }
-    await _commitBatch();
+    await _commitBatch(force: true);
     _batch = null;
     if (mounted) {
       setState(() {
@@ -4787,7 +5062,7 @@ class _HomePageState extends State<HomePage> {
                   final text = await _askNum(ctx, f);
                   if (text == null || text.trim().isEmpty) return;
                   if (ctx.mounted) Navigator.pop(ctx);
-                  _retryOne(f, text);
+                  unawaited(_retryOne(f, text));
                 },
               ),
           ],
@@ -5101,6 +5376,12 @@ class _HomePageState extends State<HomePage> {
             setState(() => _tab = 0),
         const SingleActivator(LogicalKeyboardKey.digit2, control: true): () =>
             setState(() => _tab = 1),
+        const SingleActivator(LogicalKeyboardKey.arrowLeft, control: true): () {
+          if (_tab == 1) libPageHook?.call(-1);
+        },
+        const SingleActivator(LogicalKeyboardKey.arrowRight, control: true): () {
+          if (_tab == 1) libPageHook?.call(1);
+        },
         const SingleActivator(LogicalKeyboardKey.f5): rescan,
         const SingleActivator(LogicalKeyboardKey.keyR, control: true): rescan,
         const SingleActivator(LogicalKeyboardKey.keyF, control: true): () {
