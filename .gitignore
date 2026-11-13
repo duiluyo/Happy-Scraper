@@ -1,0 +1,31 @@
+# Flutter / Dart
+.dart_tool/
+.packages
+.pub-cache/
+.pub/
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+pubspec.lock.bak
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+.DS_Store
+
+# 平台工程由 CI 现场生成；如果你决定把 android/ windows/ 提交进仓库，
+# 删掉下面两行即可。
+android/
+windows/
+
+# 构建产物
+*.apk
+*.aab
+*.exe
+*.dll
+*.pdb
+
+# 本软件在用户目录里生成的数据（配置、撤销记录、影视库索引）
+刮削器/
