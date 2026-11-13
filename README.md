@@ -2,7 +2,7 @@
 
 ![Flutter](https://img.shields.io/badge/Framework-Flutter-02569B?logo=flutter)
 ![Dart](https://img.shields.io/badge/Language-Dart-0175C2?logo=dart)
-![Version](https://img.shields.io/badge/Version-1.8.0-green)
+![Version](https://img.shields.io/badge/Version-1.9.0-green)
 ![Platform](https://img.shields.io/badge/Platform-Android%20%7C%20Windows-blue)
 ![Build](https://img.shields.io/badge/Build-GitHub%20Actions-2088FF?logo=github-actions)
 
@@ -181,6 +181,7 @@
 - **搜索**：按番号、标题、原标题、演员、厂商、系列搜索。
 - **排序**：按添加时间（默认）、发行日期、番号、标题。
 - **快速筛选**：全部 / 收藏 / 未看 / 未刮削 / 缺封面 / 图片待修复 / 重复番号。
+- **分页**：窗口底部可选择每页显示 30 / 50 / 100 / 200 部或全部（会记住你的选择），并有首页、上一页、下一页、末页按钮；点击“第 N / M 页”可输入页码直接跳转。搜索、筛选、排序条件一变，会自动回到第 1 页；翻页后列表自动回到顶部。
 - **组合筛选**：点击 🔻 **筛选**，按演员、类别、厂商、系列、年份筛选，选择时可搜索，并显示每一项的影片数量。
 - **统计**：点击 📊 **统计**，查看演员、厂商、类别的影片数量排行，点击某一项即可筛选。
 
@@ -216,14 +217,15 @@
 | `Ctrl` + `1` / `Ctrl` + `2` | 切换到「刮削」/「影视库」 |
 | `Ctrl` + `F` | 跳到影视库的搜索框 |
 | `F5` / `Ctrl` + `R` | 重新扫描影视库 |
+| `Ctrl` + `←` / `Ctrl` + `→` | 影视库翻上一页 / 下一页 |
 
 ---
 
 ## 🛠️ 环境要求与本地构建
 
 ### 开发环境
-- **Flutter SDK**: `>=3.3.0 <4.0.0`
-- **Dart SDK**: `>=3.3.0`
+- **Flutter SDK**: `3.47.x`（CI 固定为 3.47.9）
+- **Dart SDK**: `>=3.13.0`（`window_manager 0.6.0` 的要求，低于这个版本 `pub get` 会直接失败）
 - **Android Studio** 或 **VS Code**
 
 ### 主要依赖
@@ -252,6 +254,12 @@
    ```
    *生成的安装包路径：`build/app/outputs/flutter-apk/app-release.apk`*
 
+4. **跑测试与静态检查**
+   ```bash
+   flutter test      # 单元测试：番号识别 / 文件夹模板 / NFO / 整理移动
+   flutter analyze   # 静态检查（CI 里只拦截 error）
+   ```
+
 ---
 
 ## ☁️ 使用 GitHub Actions 云端打包
@@ -261,16 +269,20 @@
 ```text
 仓库根目录/
 ├── pubspec.yaml
+├── analysis_options.yaml              # 静态检查规则
 ├── lib/main.dart
+├── test/scraper_test.dart             # 单元测试（番号识别 / 模板 / NFO / 整理）
 ├── ci/debug.keystore                  # 固定签名文件（见下，仅安卓需要）
 └── .github/workflows/
-    ├── build-apk.yml                  # 打包安卓 APK
+    ├── build-apk.yml                  # 打包安卓 APK（含 analyze + test）
     └── build-windows.yml              # 打包 Windows 电脑版
 ```
 
 推送代码（或在 Actions 页面手动点击 Run workflow）即可打包，完成后在运行记录底部的 **Artifacts** 中下载：安卓版为 `app-release-apk`，电脑版为 `video-scraper-windows`。
 
 打包脚本会自动完成：
+- 先跑 `flutter analyze`（只拦截 error）和 `flutter test`，任一失败就不出包；
+- 从 `pubspec.yaml` 读取版本号并注入，标题栏显示的版本不会再和包名脱节；
 - 补全安卓工程，并添加联网与存储权限；
 - 把桌面图标上的应用名改为「影片刮削器」；
 - 把 `compileSdk` 提高到 37（`permission_handler` 需要）；
@@ -339,6 +351,25 @@
 ## 📝 更新日志
 
 > 每次更新都会在这里记录改动，版本号与 `pubspec.yaml`、软件标题栏保持一致。
+
+### v1.9.0
+- **新增 影视库分页**：每页可选 30 / 50 / 100 / 200 部或全部，默认 50；底部有首页、上一页、页码跳转、下一页、末页，也可用 `Ctrl`+`←` / `→` 翻页；只渲染当前页，影片多时打开和滚动更流畅。分页计算有单元测试覆盖。
+
+### v1.8.3
+- **修复 安卓构建在「单元测试」步骤失败**：`flutter test` 会为 `window_manager → nativeapi → cnativeapi` 编译一段原生代码（native assets），构建脚本用 `pkg-config` 探测 GTK3 / X11 / Xi。GitHub 的 `ubuntu-latest` 只有运行时库、没有 `-dev` 头文件，于是报 `Package 'gtk+-3.0' not found` 并中断。现在工作流在测试前安装这三个开发包，并当场用 `pkg-config --modversion` 自检。（`flutter analyze` 不做原生编译，所以它是绿的，问题只暴露在 test 这一步。）
+- **提前给 APK 打包备好 NDK**：`cnativeapi` 的 Android 目标同样要编译原生代码，而它找 NDK 只认 `PATH` 上的 `ndk-build` 或 `$HOME/Android/Sdk/ndk/`，runner 的 SDK 两者都不满足。新增一步把 runner 自带的 NDK 挂到 `PATH`，找不到只告警不阻断。
+
+### v1.8.2
+- **修复 安卓构建在「静态检查」步骤失败**：CI 用 `flutter create` 补全 `android/` 时会顺带生成模板自带的 `test/widget_test.dart`（里面引用模板的 `MyApp`），而本项目根组件叫 `ScraperApp`，于是 `flutter analyze` 报 `The name 'MyApp' isn't a class` 并让整个打包流程中断。现在仓库自带 `test/widget_test.dart`（一个真正会渲染首页的冒烟测试），`flutter create` 遇到已存在的文件会跳过，模板那条脏数据不会再出现；工作流里另加了一步兜底删除。
+- 顺带补上首个 widget 测试：确认根组件能建出 `MaterialApp` 并渲染出 `HomePage`（白屏 / 首帧崩溃会被它挡住）。
+
+### v1.8.1
+- **修复 撤销整理可能"删一半"**：以前先把这次生成的 NFO / 封面 / 剧照 / 字幕删掉，再把视频移回原位。只要有一个文件移回失败（被播放器占用、原位置已有同名文件、网络共享掉线），就会变成"元数据没了、视频还留在整理后的文件夹里"，而且撤销记录也被无条件删掉，无法补救。现在改为：**先移回，全部成功才清理生成物**；有失败就保留记录并只留未完成的部分，排除问题后再点一次 ↩ 就能继续。
+- **修复 配置可能被整体重置**：`config.json` 里只要有一个字段类型不对（比如手改成 `"stillsMax": 10.0`），原来会抛异常并被静默吞掉，导致 JavBus 镜像地址、代理、网络共享密码全部回到默认值且没有任何提示。现在逐字段容错读取。
+- **修复 Windows 上重复套文件夹**：目录已经是 `SSIS-123`、模板也生成 `SSIS-123` 时，因为字符串比较区分大小写被判成"还没整理"，会再套一层 `SSIS-123/SSIS-123/`。
+- **批量处理更流畅**：日志改为合并刷新（原来每条日志都整页重建，刮 500 部就是 5000 次重建），并只保留最近 3000 行；撤销记录改为最多每 5 秒落盘一次（原来每成功一部就整份重写）。
+- **其它**：封面判定不再用"大于 5000 字节"（会误杀正常小图）；代理填成 `socks://` 时「测试连接」会直接说明只支持 HTTP；网络重试之间加入退避；能识别更多 Cloudflare 拦截页；文件名按码点截断，不会切断 emoji；异常改为类型化的 `ScrapeException`（日志输出不变）；删除未使用的 `moveFile`。
+- **工程化**：新增 `analysis_options.yaml`、`test/`（番号识别 / 文件夹模板 / NFO 往返 / 整理移动）、`.gitignore`、`LICENSE`；CI 增加 `flutter analyze` 与 `flutter test`，固定 Flutter 版本，版本号改为从 `pubspec.yaml` 注入，不再和代码里的常量脱节。
 
 ### v1.8.0
 - **新增 键盘与鼠标操作（电脑版）**：`Esc`、`Backspace`、`Alt`+`←`、鼠标侧键“后退”可返回上一页；剧照放大后用 `←` `→` 翻页；弹窗里按 `Enter` 确认；`Ctrl`+`1` / `2` 切换页面，`Ctrl`+`F` 搜索，`F5` 重新扫描影视库。详见「快捷键」。

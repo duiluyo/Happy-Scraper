@@ -1,7 +1,7 @@
 name: video_scraper
 description: 影片刮削器
 publish_to: "none"
-version: 1.8.0+13
+version: 1.9.0+17
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
@@ -17,6 +17,11 @@ dependencies:
   permission_handler: ^13.0.2
   smb_connect: ^0.0.9
   window_manager: ^0.6.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
 
 flutter:
   uses-material-design: true
